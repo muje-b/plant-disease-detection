@@ -4,7 +4,8 @@ from PIL import Image
 import os
 import h5py
 import time
-import json
+import subprocess
+import sys
 
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -30,32 +31,6 @@ st.set_page_config(
 )
 
 # -------------------------------
-# Custom Object Definitions
-# -------------------------------
-def define_custom_objects():
-    """Define custom objects needed to load the model"""
-    custom_objects = {}
-    
-    # Try to import necessary modules
-    try:
-        import tensorflow as tf
-        import keras
-        
-        # Handle DTypePolicy issue
-        if hasattr(keras, 'DTypePolicy'):
-            custom_objects['DTypePolicy'] = keras.DTypePolicy
-        elif hasattr(tf.keras, 'DTypePolicy'):
-            custom_objects['DTypePolicy'] = tf.keras.DTypePolicy
-        
-        # Handle potential custom layers
-        # Add any other custom objects your model might need here
-        
-        return custom_objects
-    except ImportError as e:
-        st.error(f"Import error: {e}")
-        return {}
-
-# -------------------------------
 # Helper Functions
 # -------------------------------
 def is_valid_h5_file(file_path):
@@ -66,80 +41,46 @@ def is_valid_h5_file(file_path):
     except:
         return False
 
-def fix_model_configuration(model_path):
-    """Attempt to fix model configuration for compatibility"""
+def install_keras3():
+    """Install Keras 3 to handle the model compatibility"""
     try:
-        # Read the model configuration
-        with h5py.File(model_path, 'r+') as f:
-            if 'model_config' in f.attrs:
-                model_config = json.loads(f.attrs['model_config'])
-                
-                # Fix InputLayer configuration - replace batch_shape with batch_input_shape
-                if 'config' in model_config and 'layers' in model_config['config']:
-                    for layer in model_config['config']['layers']:
-                        if layer['class_name'] == 'InputLayer' and 'config' in layer:
-                            if 'batch_shape' in layer['config']:
-                                # Replace batch_shape with batch_input_shape
-                                layer['config']['batch_input_shape'] = layer['config']['batch_shape']
-                                del layer['config']['batch_shape']
-                    
-                    # Write the fixed configuration back
-                    f.attrs['model_config'] = json.dumps(model_config).encode('utf-8')
-                
-                return True
-    except Exception as e:
-        st.error(f"Error fixing model config: {str(e)}")
-        return False
-
-def load_model_with_custom_objects(model_path):
-    """Load model with custom objects and compatibility fixes"""
-    try:
-        import tensorflow as tf
+        # Try to import keras 3
         import keras
-        
-        # Get custom objects
-        custom_objects = define_custom_objects()
-        
-        # First try standard loading with custom objects
+        if hasattr(keras, '__version__') and keras.__version__.startswith('3'):
+            return True
+        else:
+            # Install keras 3
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "keras==3.0.0"])
+            return True
+    except:
         try:
-            model = tf.keras.models.load_model(
-                model_path, 
-                custom_objects=custom_objects,
-                compile=False
-            )
-            return model, True
-        except Exception as e:
-            st.warning(f"Standard loading with custom objects failed: {str(e)}")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "keras==3.0.0"])
+            return True
+        except:
+            return False
+
+def convert_model_to_tflite(model_path, output_path):
+    """Convert a Keras model to TensorFlow Lite format"""
+    try:
+        # First try to install keras 3 and load the model
+        if install_keras3():
+            import keras
+            model = keras.models.load_model(model_path)
             
-            # Try with Keras 3 if available
-            try:
-                model = keras.models.load_model(
-                    model_path,
-                    custom_objects=custom_objects,
-                    compile=False
-                )
-                return model, True
-            except Exception as e2:
-                st.warning(f"Keras 3 loading also failed: {str(e2)}")
-                
-                # Try fixing the model configuration
-                if fix_model_configuration(model_path):
-                    try:
-                        model = tf.keras.models.load_model(
-                            model_path,
-                            custom_objects=custom_objects,
-                            compile=False
-                        )
-                        return model, True
-                    except Exception as e3:
-                        st.error(f"Loading after config fix failed: {str(e3)}")
-                        return None, False
-                else:
-                    return None, False
-                    
+            # Convert to TensorFlow Lite
+            import tensorflow as tf
+            converter = tf.lite.TFLiteConverter.from_keras_model(model)
+            tflite_model = converter.convert()
+            
+            # Save the converted model
+            with open(output_path, 'wb') as f:
+                f.write(tflite_model)
+            
+            return True, "Model converted successfully to TensorFlow Lite format."
+        else:
+            return False, "Failed to install Keras 3 for conversion."
     except Exception as e:
-        st.error(f"Unexpected error during model loading: {str(e)}")
-        return None, False
+        return False, f"Conversion failed: {str(e)}"
 
 # -------------------------------
 # Model Upload Section
@@ -167,29 +108,45 @@ def render_model_upload():
             
             # Validate the file
             if is_valid_h5_file(model_path):
-                # Load the model with custom objects
-                model, success = load_model_with_custom_objects(model_path)
-                if success:
-                    st.session_state.model = model
-                    st.session_state.model_loaded = True
-                    st.session_state.upload_complete = True
-                    st.success("Model uploaded and loaded successfully!")
+                # Try to convert the model to TensorFlow Lite format
+                with st.spinner("Converting model for compatibility..."):
+                    tflite_path = "converted_model.tflite"
+                    success, message = convert_model_to_tflite(model_path, tflite_path)
                     
-                    # Increment the key to reset the uploader
-                    st.session_state.file_uploader_key += 1
-                    
-                    # Add a small delay before rerun to ensure UI updates
-                    time.sleep(0.5)
-                    st.rerun()
-                else:
-                    st.error("""
-                    Failed to load the model. This is likely due to version incompatibility.
-                    
-                    **Possible solutions:**
-                    1. Try to save your model with `tf.keras.models.save_model()` instead of `keras.models.save_model()`
-                    2. Convert your model to TensorFlow Lite format for better compatibility
-                    3. Ensure you're using the same TensorFlow/Keras version for saving and loading
-                    """)
+                    if success:
+                        st.success(message)
+                        
+                        # Load the converted model
+                        try:
+                            import tensorflow as tf
+                            interpreter = tf.lite.Interpreter(model_path=tflite_path)
+                            interpreter.allocate_tensors()
+                            st.session_state.model = interpreter
+                            st.session_state.model_loaded = True
+                            st.session_state.upload_complete = True
+                            st.success("Model converted and loaded successfully!")
+                            
+                            # Increment the key to reset the uploader
+                            st.session_state.file_uploader_key += 1
+                            
+                            # Add a small delay before rerun to ensure UI updates
+                            time.sleep(0.5)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to load converted model: {str(e)}")
+                    else:
+                        st.error(message)
+                        st.warning("""
+                        **Compatibility Issue Detected**
+                        
+                        Your model was created with a newer version of Keras (Keras 3.x) which is not 
+                        compatible with this environment. 
+                        
+                        **Recommended Solutions:**
+                        1. Re-save your model using TensorFlow's `tf.keras.models.save_model()` function
+                        2. Convert your model to TensorFlow Lite format externally
+                        3. Use the fallback mode for basic analysis
+                        """)
             else:
                 st.error("Uploaded file is not a valid HDF5 model file. Please upload a valid Keras model.")
 
@@ -207,10 +164,24 @@ def predict_disease_fallback(image):
     else:
         return "Possible Disease", 65.0
 
-def predict_disease(image):
-    """Predict disease from an image"""
-    if st.session_state.model is None:
-        return predict_disease_fallback(image)
+def predict_disease_tflite(image, interpreter):
+    """Predict disease from an image using TensorFlow Lite model"""
+    # Get input and output details
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    
+    # Preprocess the image
+    image = np.array(image.resize((224, 224))) / 255.0
+    image = np.expand_dims(image, axis=0).astype(np.float32)
+    
+    # Set the input tensor
+    interpreter.set_tensor(input_details[0]['index'], image)
+    
+    # Run inference
+    interpreter.invoke()
+    
+    # Get the prediction
+    prediction = interpreter.get_tensor(output_details[0]['index'])
     
     class_names = [
         "Apple Scab", "Apple Black Rot", "Apple Cedar Rust", "Apple Healthy",
@@ -230,17 +201,22 @@ def predict_disease(image):
         "Tomato Target Spot", "Tomato Yellow Leaf Curl Virus", "Tomato Mosaic Virus", "Tomato Healthy"
     ]
     
+    predicted_class = class_names[np.argmax(prediction)]
+    confidence = np.max(prediction) * 100
+    return predicted_class, confidence
+
+def predict_disease(image):
+    """Predict disease from an image"""
+    if st.session_state.model is None:
+        return predict_disease_fallback(image)
+    
     try:
-        # Preprocess the image
-        image = np.array(image.resize((224, 224))) / 255.0
-        image = np.expand_dims(image, axis=0)
-        
-        # Make prediction
-        prediction = st.session_state.model.predict(image)
-        
-        predicted_class = class_names[np.argmax(prediction)]
-        confidence = np.max(prediction) * 100
-        return predicted_class, confidence
+        # Check if we're using a TensorFlow Lite model
+        if hasattr(st.session_state.model, 'get_input_details'):
+            return predict_disease_tflite(image, st.session_state.model)
+        else:
+            # Standard Keras model prediction (if we had one)
+            return predict_disease_fallback(image)
     except Exception as e:
         st.error(f"Error during prediction: {str(e)}")
         return predict_disease_fallback(image)
@@ -346,18 +322,33 @@ def main():
         **Note:** Without a trained model, the app uses a simple fallback detection method with limited accuracy.
         """)
         
-        # Debug information
-        with st.expander("Debug Information"):
-            st.write(f"Model loaded: {st.session_state.model_loaded}")
-            if st.session_state.model_loaded:
-                try:
-                    st.write("Model architecture:")
-                    # This might not work for all models, so we wrap it in a try-except
-                    summary_list = []
-                    st.session_state.model.summary(print_fn=lambda x: summary_list.append(x))
-                    st.text("\n".join(summary_list))
-                except:
-                    st.write("Model summary not available")
+        # Model conversion instructions
+        with st.expander("Model Conversion Instructions"):
+            st.markdown("""
+            ### If your model fails to load:
+            
+            Your model was likely created with Keras 3.x, which is not compatible with this environment.
+            
+            **To fix this:**
+            
+            1. **Re-save your model with TensorFlow:**
+               ```python
+               # In your training environment
+               import tensorflow as tf
+               tf.keras.models.save_model(model, "compatible_model.h5")
+               ```
+            
+            2. **Convert to TensorFlow Lite:**
+               ```python
+               # In your training environment
+               converter = tf.lite.TFLiteConverter.from_keras_model(model)
+               tflite_model = converter.convert()
+               with open('model.tflite', 'wb') as f:
+                   f.write(tflite_model)
+               ```
+            
+            3. **Use the converted model in this app**
+            """)
 
 # Run the app
 if __name__ == "__main__":
