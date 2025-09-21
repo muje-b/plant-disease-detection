@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 from PIL import Image
 import os
+import h5py
 import time
 
 # Initialize session state
@@ -9,6 +10,8 @@ if 'model_loaded' not in st.session_state:
     st.session_state.model_loaded = False
 if 'model' not in st.session_state:
     st.session_state.model = None
+if 'model_type' not in st.session_state:
+    st.session_state.model_type = None  # 'h5' or 'tflite'
 
 # -------------------------------
 # App Configuration
@@ -28,9 +31,64 @@ def load_tflite_model(model_path):
         import tensorflow as tf
         interpreter = tf.lite.Interpreter(model_path=model_path)
         interpreter.allocate_tensors()
-        return interpreter, True
+        return interpreter, True, "tflite"
     except Exception as e:
-        return None, False
+        return None, False, f"Error loading TensorFlow Lite model: {str(e)}"
+
+def load_h5_model(model_path):
+    """Load a Keras .h5 model with compatibility handling"""
+    try:
+        # First try with standard TensorFlow loading
+        import tensorflow as tf
+        model = tf.keras.models.load_model(model_path)
+        return model, True, "h5"
+    except Exception as e:
+        error_msg = f"Standard loading failed: {str(e)}"
+        
+        # Try with custom objects for Keras 3 compatibility
+        try:
+            custom_objects = {}
+            
+            # Try to handle DTypePolicy issue
+            try:
+                from keras import DTypePolicy
+                custom_objects['DTypePolicy'] = DTypePolicy
+            except:
+                pass
+                
+            # Try to handle other potential custom objects
+            try:
+                from keras.src.optimizers import Adam
+                custom_objects['Adam'] = Adam
+            except:
+                pass
+                
+            model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+            return model, True, "h5"
+        except Exception as e2:
+            return None, False, f"{error_msg}\nCustom objects loading also failed: {str(e2)}"
+
+def is_valid_h5_file(file_path):
+    """Check if a file is a valid HDF5 file"""
+    try:
+        with h5py.File(file_path, 'r') as f:
+            return True
+    except:
+        return False
+
+# -------------------------------
+# Plant Disease Prediction Functions
+# -------------------------------
+def predict_disease_fallback(image):
+    """Simple fallback disease prediction"""
+    # Simple heuristic based on color analysis
+    image_array = np.array(image.resize((224, 224)))
+    avg_green = np.mean(image_array[:, :, 1])  # Green channel
+    
+    if avg_green > 150:
+        return "Healthy", 75.0
+    else:
+        return "Possible Disease", 65.0
 
 def predict_disease_tflite(image, interpreter):
     """Predict disease from an image using TensorFlow Lite model"""
@@ -73,19 +131,36 @@ def predict_disease_tflite(image, interpreter):
     confidence = np.max(prediction) * 100
     return predicted_class, confidence
 
-# -------------------------------
-# Plant Disease Prediction Functions
-# -------------------------------
-def predict_disease_fallback(image):
-    """Simple fallback disease prediction"""
-    # Simple heuristic based on color analysis
-    image_array = np.array(image.resize((224, 224)))
-    avg_green = np.mean(image_array[:, :, 1])  # Green channel
+def predict_disease_h5(image, model):
+    """Predict disease from an image using Keras model"""
+    # Preprocess the image
+    image = np.array(image.resize((224, 224))) / 255.0
+    image = np.expand_dims(image, axis=0)
     
-    if avg_green > 150:
-        return "Healthy", 75.0
-    else:
-        return "Possible Disease", 65.0
+    # Make prediction
+    prediction = model.predict(image)
+    
+    class_names = [
+        "Apple Scab", "Apple Black Rot", "Apple Cedar Rust", "Apple Healthy",
+        "Blueberry Healthy", "Cherry Powdery Mildew", "Cherry Healthy",
+        "Corn Cercospora Leaf Spot", "Corn Common Rust", "Corn Northern Leaf Blight", "Corn Healthy",
+        "Grape Black Rot", "Grape Esca", "Grape Leaf Blight", "Grape Healthy",
+        "Orange Huanglongbing (Citrus Greening)",
+        "Peach Bacterial Spot", "Peach Healthy",
+        "Pepper Bell Bacterial Spot", "Pepper Bell Healthy",
+        "Potato Early Blight", "Potato Late Blight", "Potato Healthy",
+        "Raspberry Healthy",
+        "Soybean Healthy",
+        "Squash Powdery Mildew",
+        "Strawberry Leaf Scorch", "Strawberry Healthy",
+        "Tomato Bacterial Spot", "Tomato Early Blight", "Tomato Late Blight",
+        "Tomato Leaf Mold", "Tomato Septoria Leaf Spot", "Tomato Spider Mites", 
+        "Tomato Target Spot", "Tomato Yellow Leaf Curl Virus", "Tomato Mosaic Virus", "Tomato Healthy"
+    ]
+    
+    predicted_class = class_names[np.argmax(prediction)]
+    confidence = np.max(prediction) * 100
+    return predicted_class, confidence
 
 def predict_disease(image):
     """Predict disease from an image"""
@@ -93,9 +168,10 @@ def predict_disease(image):
         return predict_disease_fallback(image)
     
     try:
-        # Check if we're using a TensorFlow Lite model
-        if hasattr(st.session_state.model, 'get_input_details'):
+        if st.session_state.model_type == "tflite":
             return predict_disease_tflite(image, st.session_state.model)
+        elif st.session_state.model_type == "h5":
+            return predict_disease_h5(image, st.session_state.model)
         else:
             return predict_disease_fallback(image)
     except Exception as e:
@@ -116,117 +192,76 @@ def get_chat_response(user_input):
         return f"Sorry, I encountered an error: {str(e)}. Please try again later."
 
 # -------------------------------
-# Conversion Instructions
-# -------------------------------
-def show_conversion_instructions():
-    """Show instructions for converting the model"""
-    with st.sidebar.expander("How to Convert Your Model", expanded=True):
-        st.markdown("""
-        ### Convert Your Model to TensorFlow Lite Format
-        
-        **Why convert?**
-        - TensorFlow Lite models are smaller and more efficient
-        - Better compatibility across different platforms
-        - Faster inference on mobile and web applications
-        
-        **Conversion Steps:**
-        
-        1. **Install required packages:**
-        ```bash
-        pip install tensorflow keras
-        ```
-        
-        2. **Run this conversion script:**
-        ```python
-        import tensorflow as tf
-        import keras
-        
-        # Load your Keras model
-        model = keras.models.load_model("plant_disease_vgg16_optimized.h5")
-        
-        # Convert to TensorFlow Lite
-        converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        tflite_model = converter.convert()
-        
-        # Save the converted model
-        with open('converted_model.tflite', 'wb') as f:
-            f.write(tflite_model)
-            
-        print("Model converted successfully!")
-        ```
-        
-        3. **Upload the converted .tflite file** below
-        """)
-
-# -------------------------------
 # Model Upload Section
 # -------------------------------
 def render_model_upload():
     """Render the model upload section"""
     st.sidebar.header("Model Configuration")
     
-    show_conversion_instructions()
-    
-    # Option 1: Upload TensorFlow Lite model
-    st.sidebar.subheader("Upload Converted Model")
+    # Model upload section
     uploaded_file = st.sidebar.file_uploader(
-        "Choose a .tflite model file", 
-        type=["tflite"],
-        help="Upload your model in TensorFlow Lite format"
+        "Choose a model file", 
+        type=["h5", "tflite"],
+        help="Upload your trained model in .h5 or .tflite format"
     )
     
     if uploaded_file is not None:
+        # Determine file type
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        
         # Save the uploaded file
-        model_path = "uploaded_model.tflite"
+        model_path = f"uploaded_model.{file_extension}"
         with open(model_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
-        # Load the model
-        model, success = load_tflite_model(model_path)
+        # Load the model based on file type
+        if file_extension == "tflite":
+            model, success, message = load_tflite_model(model_path)
+        elif file_extension == "h5":
+            # Validate the file first
+            if not is_valid_h5_file(model_path):
+                st.sidebar.error("Uploaded file is not a valid HDF5 file.")
+                return
+            model, success, message = load_h5_model(model_path)
+        else:
+            st.sidebar.error(f"Unsupported file format: {file_extension}")
+            return
+        
         if success:
             st.session_state.model = model
             st.session_state.model_loaded = True
+            st.session_state.model_type = file_extension
             st.sidebar.success("Model loaded successfully!")
             st.rerun()
         else:
-            st.sidebar.error("Failed to load the TensorFlow Lite model.")
-    
-    # Option 2: Download from URL
-    st.sidebar.subheader("Or Download from URL")
-    model_url = st.sidebar.text_input("Enter model URL:", placeholder="https://example.com/model.tflite")
-    
-    if st.sidebar.button("Download Model") and model_url:
-        try:
-            import requests
-            from urllib.parse import urlparse
+            st.sidebar.error(f"Failed to load model: {message}")
             
-            # Extract filename from URL
-            parsed_url = urlparse(model_url)
-            filename = os.path.basename(parsed_url.path)
-            if not filename:
-                filename = "downloaded_model.tflite"
-                
-            # Download the model
-            response = requests.get(model_url, stream=True)
-            if response.status_code == 200:
-                model_path = filename
-                with open(model_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                
-                # Load the model
-                model, success = load_tflite_model(model_path)
-                if success:
-                    st.session_state.model = model
-                    st.session_state.model_loaded = True
-                    st.sidebar.success("Model downloaded and loaded successfully!")
-                    st.rerun()
-                else:
-                    st.sidebar.error("Failed to load the downloaded model.")
-            else:
-                st.sidebar.error(f"Failed to download model. Status code: {response.status_code}")
-        except Exception as e:
-            st.sidebar.error(f"Error downloading model: {str(e)}")
+            # Show conversion options for .h5 files
+            if file_extension == "h5":
+                with st.sidebar.expander("Conversion Options"):
+                    st.markdown("""
+                    Your .h5 model might be incompatible with this environment.
+                    
+                    **Options:**
+                    1. Try to convert your model to TensorFlow Lite format
+                    2. Use the fallback mode for basic analysis
+                    
+                    **To convert your model:**
+                    ```python
+                    import tensorflow as tf
+                    
+                    # Load your model
+                    model = tf.keras.models.load_model("your_model.h5")
+                    
+                    # Convert to TensorFlow Lite
+                    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+                    tflite_model = converter.convert()
+                    
+                    # Save the converted model
+                    with open('converted_model.tflite', 'wb') as f:
+                        f.write(tflite_model)
+                    ```
+                    """)
 
 # -------------------------------
 # Main Application UI
@@ -239,7 +274,7 @@ def main():
     
     # Display model status
     if st.session_state.model_loaded:
-        st.sidebar.success("✅ Model Loaded Successfully!")
+        st.sidebar.success(f"✅ {st.session_state.model_type.upper()} Model Loaded Successfully!")
     else:
         st.sidebar.warning("⚠️ No Model Loaded - Using Fallback Mode")
     
@@ -308,8 +343,12 @@ def main():
         - Receive treatment recommendations
         - Chat with a plant disease expert AI
         
-        **Note:** For best results, convert your model to TensorFlow Lite format and upload it.
-        Without a compatible model, the app uses a simple fallback detection method with limited accuracy.
+        **Supported Model Formats:**
+        - Keras .h5 models
+        - TensorFlow Lite .tflite models
+        
+        **Note:** If your .h5 model fails to load, it might be incompatible with this environment.
+        Consider converting it to TensorFlow Lite format for better compatibility.
         """)
 
 # Run the app
