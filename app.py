@@ -17,6 +17,8 @@ if 'image_uploader_counter' not in st.session_state:
     st.session_state.image_uploader_counter = 0
 if 'model_validated' not in st.session_state:
     st.session_state.model_validated = False
+if 'last_model_path' not in st.session_state:
+    st.session_state.last_model_path = ""
 
 # -------------------------------
 # App Configuration
@@ -213,14 +215,14 @@ def process_uploaded_image(image):
         # Display the uploaded image
         st.image(image, caption="Uploaded Image", use_container_width=True)
         
+        # Revalidate model state before prediction
+        if not validate_model_state():
+            st.session_state.model_loaded = False
+            st.session_state.model = None
+        
         # Analyze button
         if st.button("Analyze Disease", type="primary", key="analyze_button"):
             with st.spinner("Analyzing..."):
-                # Revalidate model state before prediction
-                if not validate_model_state():
-                    st.session_state.model_loaded = False
-                    st.session_state.model = None
-                
                 # Predict disease
                 disease, confidence = predict_disease(image)
                 
@@ -279,6 +281,7 @@ def render_model_upload():
             st.session_state.model = model
             st.session_state.model_loaded = True
             st.session_state.model_validated = True
+            st.session_state.last_model_path = model_path
             st.sidebar.success("Model loaded and validated successfully!")
             # Increment the counter to reset the uploader
             st.session_state.file_uploader_counter += 1
