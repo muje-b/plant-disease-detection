@@ -3,7 +3,7 @@ streamlit==1.27.0
 rich>=10.14.0,<14
 
 # Machine Learning / AI
-tensorflow-cpu==2.14.0
+pip install --upgrade tensorflow==2.14.0
 torch==2.1.0
 torchaudio==2.1.0
 openai-whisper==20231117
