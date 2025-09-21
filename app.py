@@ -9,20 +9,18 @@ from PIL import Image
 import ollama
 import io
 import os
-import requests  # for downloading the model
+import gdown  # <-- Use gdown instead of requests for Google Drive
 
 # -------------------------------
 # Download VGG16 model from Google Drive
 # -------------------------------
 MODEL_PATH = "plant_disease_vgg16_optimized.h5"
-# Replace YOUR_FILE_ID with your Google Drive file ID
-MODEL_URL = "https://drive.google.com/file/d/1IYZz7ibvzsngy0mFbsUFFFLxjbT7_0Bi/view?usp=sharing"
+FILE_ID = "1IYZz7ibvzsngy0mFbsUFFFLxjbT7_0Bi"  # Google Drive File ID
+MODEL_URL = f"https://drive.google.com/uc?id={FILE_ID}"  # Direct download URL
 
 if not os.path.exists(MODEL_PATH):
     st.info("Downloading VGG16 model from Google Drive...")
-    r = requests.get(MODEL_URL, allow_redirects=True)
-    with open(MODEL_PATH, "wb") as f:
-        f.write(r.content)
+    gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
     st.success("Model downloaded successfully!")
 
 # -------------------------------
@@ -30,7 +28,10 @@ if not os.path.exists(MODEL_PATH):
 # -------------------------------
 @st.cache_resource
 def load_vgg_model():
-    return tf.keras.models.load_model(MODEL_PATH)
+    st.info("Loading VGG16 model...")
+    model = tf.keras.models.load_model(MODEL_PATH)
+    st.success("VGG16 model loaded successfully!")
+    return model
 
 vgg_model = load_vgg_model()
 
@@ -39,7 +40,10 @@ vgg_model = load_vgg_model()
 # -------------------------------
 @st.cache_resource
 def load_whisper_model():
-    return whisper.load_model("base")  # Use "small", "medium", or "large" for better accuracy
+    st.info("Loading Whisper model...")
+    model = whisper.load_model("base")  # or "small", "medium", "large"
+    st.success("Whisper model loaded successfully!")
+    return model
 
 whisper_model = load_whisper_model()
 
@@ -65,23 +69,19 @@ def predict_disease(image):
         "Tomato Target Spot", "Tomato Yellow Leaf Curl Virus", "Tomato Mosaic Virus", "Tomato Healthy"
     ]
     
-    image = np.array(image.resize((224, 224))) / 255.0  # Resize & Normalize
+    image = np.array(image.resize((224, 224))) / 255.0
     image = np.expand_dims(image, axis=0)
     prediction = vgg_model.predict(image)
     
     predicted_class = class_names[np.argmax(prediction)]
     confidence = np.max(prediction) * 100
-    
     return predicted_class, confidence
 
 # -------------------------------
 # AI Chatbot using Ollama
 # -------------------------------
 def get_chat_response(user_input):
-    prompt = f"""
-    You are a plant disease expert. Answer based on scientific agricultural knowledge.
-    Question: {user_input}
-    """
+    prompt = f"You are a plant disease expert. Answer based on scientific agricultural knowledge.\nQuestion: {user_input}"
     response = ollama.chat(model="tinyllama", messages=[{"role": "user", "content": prompt}])
     return response["message"]["content"]
 
@@ -119,7 +119,7 @@ def text_to_speech(response_text):
     tts = gTTS(text=response_text, lang="en")
     audio_path = "response.mp3"
     tts.save(audio_path)
-    return audio_path  # Return path of the saved audio file
+    return audio_path
 
 # -------------------------------
 # Streamlit UI
