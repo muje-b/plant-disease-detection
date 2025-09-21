@@ -1,36 +1,32 @@
-# Streamlit
+# Web / App
 streamlit==1.27.0
+rich>=10.14.0,<14
 
-# Machine learning
+# Machine Learning / AI
 tensorflow-cpu==2.14.0
 torch==2.1.0
 torchaudio==2.1.0
 openai-whisper==20231117
-
-# Numerical & image processing
 numpy==1.25.2
-Pillow==9.5.0
+pandas==2.3.2
+pyarrow==21.0.0
+protobuf==4.25.8
 
-# Speech & audio
+# Image & Audio
+Pillow==9.5.0
 SpeechRecognition==3.11.0
 gTTS==2.2.4
 
-# API & HTTP
+# Utilities
 requests==2.31.0
 ollama==0.4.9
-
-# Optional/Streamlit dependencies
 altair==5.5.0
 blinker==1.9.0
 cachetools==5.5.2
 click==8.3.0
 importlib-metadata==6.11.0
 packaging==23.2
-pandas==2.3.2
-protobuf==4.25.8
-pyarrow==21.0.0
 python-dateutil==2.9.0.post0
-rich==14.1.0
 tenacity==8.5.0
 toml==0.10.2
 typing-extensions==4.15.0
