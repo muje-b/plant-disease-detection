@@ -2,5 +2,4 @@ tensorflow==2.15.0
 streamlit==1.27.0
 numpy==1.25.2
 Pillow==9.5.0
-h5py==3.10.0
 ollama==0.4.9
