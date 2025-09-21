@@ -23,7 +23,6 @@ altair==5.5.0
 pydeck==0.9.1
 tornado==6.5.2
 watchdog==6.0.0
-gdown==4.7.1  # For downloading large files from Google Drive
 
 # Utilities
 requests==2.31.0
