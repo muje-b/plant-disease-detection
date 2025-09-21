@@ -1,10 +1,10 @@
 import streamlit as st
-import tensorflow as tf
 import numpy as np
 from PIL import Image
 import os
 import h5py
 import time
+import json
 
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -33,21 +33,58 @@ st.set_page_config(
 # Helper Functions
 # -------------------------------
 def is_valid_h5_file(file_path):
-    """Check if a file is a valid HDF5 file and contains a Keras model"""
+    """Check if a file is a valid HDF5 file"""
     try:
         with h5py.File(file_path, 'r') as f:
-            return 'model_weights' in f.keys() or 'model_config' in f.keys()
+            return True
     except:
         return False
 
-def load_model_from_path(model_path):
-    """Load a model from file path with error handling"""
+def fix_model_config(model_path):
+    """Attempt to fix model configuration for compatibility"""
     try:
+        # Read the model configuration
+        with h5py.File(model_path, 'r+') as f:
+            if 'model_config' in f.attrs:
+                model_config = json.loads(f.attrs['model_config'])
+                
+                # Fix InputLayer configuration
+                if 'config' in model_config and 'layers' in model_config['config']:
+                    for layer in model_config['config']['layers']:
+                        if layer['class_name'] == 'InputLayer' and 'batch_shape' in layer['config']:
+                            # Replace batch_shape with batch_input_shape
+                            layer['config']['batch_input_shape'] = layer['config']['batch_shape']
+                            del layer['config']['batch_shape']
+                    
+                    # Write the fixed configuration back
+                    f.attrs['model_config'] = json.dumps(model_config).encode('utf-8')
+                
+                return True
+    except Exception as e:
+        st.error(f"Error fixing model config: {str(e)}")
+        return False
+
+def load_model_with_compatibility(model_path):
+    """Load model with compatibility fixes"""
+    try:
+        # First try standard loading
+        import tensorflow as tf
         model = tf.keras.models.load_model(model_path)
         return model, True
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        return None, False
+        st.warning(f"Standard loading failed: {str(e)}")
+        
+        # Try with compatibility fixes
+        try:
+            # Fix the model configuration
+            if fix_model_config(model_path):
+                # Try loading again
+                import tensorflow as tf
+                model = tf.keras.models.load_model(model_path)
+                return model, True
+        except Exception as e2:
+            st.error(f"Compatibility loading also failed: {str(e2)}")
+            return None, False
 
 # -------------------------------
 # Model Upload Section
@@ -75,8 +112,8 @@ def render_model_upload():
             
             # Validate the file
             if is_valid_h5_file(model_path):
-                # Load the model
-                model, success = load_model_from_path(model_path)
+                # Load the model with compatibility fixes
+                model, success = load_model_with_compatibility(model_path)
                 if success:
                     st.session_state.model = model
                     st.session_state.model_loaded = True
@@ -251,8 +288,14 @@ def main():
         with st.expander("Debug Information"):
             st.write(f"Model loaded: {st.session_state.model_loaded}")
             if st.session_state.model_loaded:
-                st.write("Model architecture:")
-                st.write(st.session_state.model.summary() if hasattr(st.session_state.model, 'summary') else "No summary available")
+                try:
+                    st.write("Model architecture:")
+                    # This might not work for all models, so we wrap it in a try-except
+                    summary_list = []
+                    st.session_state.model.summary(print_fn=lambda x: summary_list.append(x))
+                    st.text("\n".join(summary_list))
+                except:
+                    st.write("Model summary not available")
 
 # Run the app
 if __name__ == "__main__":
