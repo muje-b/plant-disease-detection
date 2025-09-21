@@ -30,6 +30,32 @@ st.set_page_config(
 )
 
 # -------------------------------
+# Custom Object Definitions
+# -------------------------------
+def define_custom_objects():
+    """Define custom objects needed to load the model"""
+    custom_objects = {}
+    
+    # Try to import necessary modules
+    try:
+        import tensorflow as tf
+        import keras
+        
+        # Handle DTypePolicy issue
+        if hasattr(keras, 'DTypePolicy'):
+            custom_objects['DTypePolicy'] = keras.DTypePolicy
+        elif hasattr(tf.keras, 'DTypePolicy'):
+            custom_objects['DTypePolicy'] = tf.keras.DTypePolicy
+        
+        # Handle potential custom layers
+        # Add any other custom objects your model might need here
+        
+        return custom_objects
+    except ImportError as e:
+        st.error(f"Import error: {e}")
+        return {}
+
+# -------------------------------
 # Helper Functions
 # -------------------------------
 def is_valid_h5_file(file_path):
@@ -40,7 +66,7 @@ def is_valid_h5_file(file_path):
     except:
         return False
 
-def fix_model_config(model_path):
+def fix_model_configuration(model_path):
     """Attempt to fix model configuration for compatibility"""
     try:
         # Read the model configuration
@@ -48,13 +74,14 @@ def fix_model_config(model_path):
             if 'model_config' in f.attrs:
                 model_config = json.loads(f.attrs['model_config'])
                 
-                # Fix InputLayer configuration
+                # Fix InputLayer configuration - replace batch_shape with batch_input_shape
                 if 'config' in model_config and 'layers' in model_config['config']:
                     for layer in model_config['config']['layers']:
-                        if layer['class_name'] == 'InputLayer' and 'batch_shape' in layer['config']:
-                            # Replace batch_shape with batch_input_shape
-                            layer['config']['batch_input_shape'] = layer['config']['batch_shape']
-                            del layer['config']['batch_shape']
+                        if layer['class_name'] == 'InputLayer' and 'config' in layer:
+                            if 'batch_shape' in layer['config']:
+                                # Replace batch_shape with batch_input_shape
+                                layer['config']['batch_input_shape'] = layer['config']['batch_shape']
+                                del layer['config']['batch_shape']
                     
                     # Write the fixed configuration back
                     f.attrs['model_config'] = json.dumps(model_config).encode('utf-8')
@@ -64,27 +91,55 @@ def fix_model_config(model_path):
         st.error(f"Error fixing model config: {str(e)}")
         return False
 
-def load_model_with_compatibility(model_path):
-    """Load model with compatibility fixes"""
+def load_model_with_custom_objects(model_path):
+    """Load model with custom objects and compatibility fixes"""
     try:
-        # First try standard loading
         import tensorflow as tf
-        model = tf.keras.models.load_model(model_path)
-        return model, True
-    except Exception as e:
-        st.warning(f"Standard loading failed: {str(e)}")
+        import keras
         
-        # Try with compatibility fixes
+        # Get custom objects
+        custom_objects = define_custom_objects()
+        
+        # First try standard loading with custom objects
         try:
-            # Fix the model configuration
-            if fix_model_config(model_path):
-                # Try loading again
-                import tensorflow as tf
-                model = tf.keras.models.load_model(model_path)
+            model = tf.keras.models.load_model(
+                model_path, 
+                custom_objects=custom_objects,
+                compile=False
+            )
+            return model, True
+        except Exception as e:
+            st.warning(f"Standard loading with custom objects failed: {str(e)}")
+            
+            # Try with Keras 3 if available
+            try:
+                model = keras.models.load_model(
+                    model_path,
+                    custom_objects=custom_objects,
+                    compile=False
+                )
                 return model, True
-        except Exception as e2:
-            st.error(f"Compatibility loading also failed: {str(e2)}")
-            return None, False
+            except Exception as e2:
+                st.warning(f"Keras 3 loading also failed: {str(e2)}")
+                
+                # Try fixing the model configuration
+                if fix_model_configuration(model_path):
+                    try:
+                        model = tf.keras.models.load_model(
+                            model_path,
+                            custom_objects=custom_objects,
+                            compile=False
+                        )
+                        return model, True
+                    except Exception as e3:
+                        st.error(f"Loading after config fix failed: {str(e3)}")
+                        return None, False
+                else:
+                    return None, False
+                    
+    except Exception as e:
+        st.error(f"Unexpected error during model loading: {str(e)}")
+        return None, False
 
 # -------------------------------
 # Model Upload Section
@@ -112,8 +167,8 @@ def render_model_upload():
             
             # Validate the file
             if is_valid_h5_file(model_path):
-                # Load the model with compatibility fixes
-                model, success = load_model_with_compatibility(model_path)
+                # Load the model with custom objects
+                model, success = load_model_with_custom_objects(model_path)
                 if success:
                     st.session_state.model = model
                     st.session_state.model_loaded = True
@@ -127,7 +182,14 @@ def render_model_upload():
                     time.sleep(0.5)
                     st.rerun()
                 else:
-                    st.error("Failed to load the model. Please try a different file.")
+                    st.error("""
+                    Failed to load the model. This is likely due to version incompatibility.
+                    
+                    **Possible solutions:**
+                    1. Try to save your model with `tf.keras.models.save_model()` instead of `keras.models.save_model()`
+                    2. Convert your model to TensorFlow Lite format for better compatibility
+                    3. Ensure you're using the same TensorFlow/Keras version for saving and loading
+                    """)
             else:
                 st.error("Uploaded file is not a valid HDF5 model file. Please upload a valid Keras model.")
 
