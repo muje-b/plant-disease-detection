@@ -1,12 +1,10 @@
 import streamlit as st
 import numpy as np
-import requests
+import tensorflow as tf
+from PIL import Image
 import os
 import h5py
-from PIL import Image
 import time
-import json
-from pathlib import Path
 
 # -------------------------------
 # App Configuration
@@ -21,7 +19,6 @@ st.set_page_config(
 # Model Configuration
 # -------------------------------
 MODEL_PATH = "plant_disease_vgg16_optimized.h5"
-FILE_ID = "1IYZz7ibvzsngy0mFbsUFFFLxjbT7_0Bi"
 
 # -------------------------------
 # Helper Functions
@@ -37,137 +34,6 @@ def is_valid_h5_file(file_path):
     except:
         return False
 
-def download_model_google_drive():
-    """Download model from Google Drive with proper authentication handling"""
-    try:
-        # Method 1: Direct download (may work for public files)
-        url = f"https://drive.google.com/uc?id={FILE_ID}&export=download"
-        
-        # Create a session to handle cookies
-        session = requests.Session()
-        
-        # Initial request to get confirmation token
-        response = session.get(url, stream=True)
-        
-        # Check if we need to confirm download (for large files)
-        for key, value in response.cookies.items():
-            if key.startswith('download_warning'):
-                confirm_token = value
-                url = f"https://drive.google.com/uc?id={FILE_ID}&export=download&confirm={confirm_token}"
-                response = session.get(url, stream=True)
-                break
-        
-        # Get file size for progress tracking
-        total_size = int(response.headers.get('content-length', 0))
-        block_size = 1024 * 1024  # 1MB blocks
-        
-        # Download with progress
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        with open(MODEL_PATH, 'wb') as f:
-            downloaded = 0
-            for data in response.iter_content(block_size):
-                downloaded += len(data)
-                f.write(data)
-                
-                if total_size > 0:
-                    progress = min(downloaded / total_size, 1.0)
-                    progress_bar.progress(progress)
-                    status_text.text(f"Downloaded {downloaded}/{total_size} bytes ({progress*100:.1f}%)")
-        
-        progress_bar.empty()
-        status_text.empty()
-        
-        # Validate the downloaded file
-        if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1024:  # At least 1KB
-            if is_valid_h5_file(MODEL_PATH):
-                return True
-            else:
-                st.error("Downloaded file is not a valid HDF5 model")
-                return False
-        else:
-            st.error("Downloaded file is too small or doesn't exist")
-            return False
-            
-    except Exception as e:
-        st.error(f"Google Drive download failed: {str(e)}")
-        return False
-
-def try_alternative_download():
-    """Try alternative download methods if Google Drive fails"""
-    st.info("Trying alternative download methods...")
-    
-    # Method 2: Try different Google Drive URL format
-    try:
-        url = f"https://docs.google.com/uc?export=download&id={FILE_ID}"
-        response = requests.get(url, stream=True)
-        
-        # Handle virus scan warning
-        for key, value in response.cookies.items():
-            if key.startswith('download_warning'):
-                url = f"https://docs.google.com/uc?export=download&confirm={value}&id={FILE_ID}"
-                response = requests.get(url, stream=True)
-                break
-        
-        # Download the file
-        with open(MODEL_PATH, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=32768):
-                if chunk:
-                    f.write(chunk)
-        
-        if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1024:
-            if is_valid_h5_file(MODEL_PATH):
-                return True
-    except:
-        pass
-    
-    # Method 3: Try to use gdown library as fallback
-    try:
-        import gdown
-        url = f"https://drive.google.com/uc?id={FILE_ID}"
-        gdown.download(url, MODEL_PATH, quiet=False)
-        
-        if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1024:
-            if is_valid_h5_file(MODEL_PATH):
-                return True
-    except:
-        pass
-    
-    return False
-
-# -------------------------------
-# Download and Verify Model
-# -------------------------------
-@st.cache_resource
-def download_and_verify_model():
-    """Download the model with verification"""
-    # Check if file already exists and is valid
-    if os.path.exists(MODEL_PATH):
-        if is_valid_h5_file(MODEL_PATH):
-            st.success("Model already exists and is valid!")
-            return True
-        else:
-            st.warning("Model file exists but is corrupted. Redownloading...")
-            os.remove(MODEL_PATH)
-    
-    # Download the model using primary method
-    with st.spinner("Downloading VGG16 model from Google Drive..."):
-        if download_model_google_drive():
-            st.success("Model downloaded and verified successfully!")
-            return True
-        
-        # If primary method failed, try alternatives
-        if try_alternative_download():
-            st.success("Model downloaded via alternative method!")
-            return True
-            
-        st.error("All download methods failed. Using fallback mode.")
-        return False
-
-# Attempt to download and verify the model
-download_success = download_and_verify_model()
-
 # -------------------------------
 # Load Plant Disease Classification Model (VGG16)
 # -------------------------------
@@ -175,37 +41,26 @@ download_success = download_and_verify_model()
 def load_vgg_model():
     """Load the VGG16 model with error handling"""
     if not os.path.exists(MODEL_PATH):
-        st.error("Model file not found.")
         return None
     
     try:
         if not is_valid_h5_file(MODEL_PATH):
-            st.error("Model file is corrupted. Please try downloading again.")
             return None
             
-        st.info("Loading VGG16 model...")
-        
         # Try to load with standard approach first
         try:
-            import tensorflow as tf
             model = tf.keras.models.load_model(MODEL_PATH)
-            st.success("VGG16 model loaded successfully with TensorFlow!")
             return model
         except Exception as e:
-            st.warning(f"TensorFlow loading failed: {str(e)}")
-            
             # Try with Keras 3 if available
             try:
                 import keras
                 model = keras.models.load_model(MODEL_PATH)
-                st.success("VGG16 model loaded successfully with Keras 3!")
                 return model
             except Exception as e2:
-                st.error(f"Keras 3 loading also failed: {str(e2)}")
                 return None
                 
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
         return None
 
 # Load the model
@@ -218,13 +73,10 @@ vgg_model = load_vgg_model()
 def load_whisper_model():
     """Load the Whisper model with error handling"""
     try:
-        st.info("Loading Whisper model...")
         import whisper
         model = whisper.load_model("base")
-        st.success("Whisper model loaded successfully!")
         return model
     except Exception as e:
-        st.error(f"Error loading Whisper model: {str(e)}")
         return None
 
 whisper_model = load_whisper_model()
@@ -234,8 +86,6 @@ whisper_model = load_whisper_model()
 # -------------------------------
 def predict_disease_fallback(image):
     """Simple fallback disease prediction"""
-    st.warning("Using fallback prediction method (main model unavailable)")
-    
     # Simple heuristic based on color analysis
     image_array = np.array(image.resize((224, 224)))
     avg_green = np.mean(image_array[:, :, 1])  # Green channel
@@ -256,7 +106,7 @@ def predict_disease(image):
         "Corn Cercospora Leaf Spot", "Corn Common Rust", "Corn Northern Leaf Blight", "Corn Healthy",
         "Grape Black Rot", "Grape Esca", "Grape Leaf Blight", "Grape Healthy",
         "Orange Huanglongbing (Citrus Greening)",
-        "Peach Bacterial Spot", "Peach Healthy",
+        "Peach Bacterial Step", "Peach Healthy",
         "Pepper Bell Bacterial Spot", "Pepper Bell Healthy",
         "Potato Early Blight", "Potato Late Blight", "Potato Healthy",
         "Raspberry Healthy",
@@ -269,29 +119,24 @@ def predict_disease(image):
     ]
     
     try:
-        # Check which library we're using
-        if hasattr(vgg_model, 'predict'):
-            # Standard Keras/TensorFlow model
-            image = np.array(image.resize((224, 224))) / 255.0
-            image = np.expand_dims(image, axis=0)
-            prediction = vgg_model.predict(image)
-            
-            predicted_class = class_names[np.argmax(prediction)]
-            confidence = np.max(prediction) * 100
-            return predicted_class, confidence
-        else:
-            # Fallback if model format is unexpected
-            return predict_disease_fallback(image)
+        # Standard Keras/TensorFlow model
+        image = np.array(image.resize((224, 224))) / 255.0
+        image = np.expand_dims(image, axis=0)
+        prediction = vgg_model.predict(image)
+        
+        predicted_class = class_names[np.argmax(prediction)]
+        confidence = np.max(prediction) * 100
+        return predicted_class, confidence
     except Exception as e:
-        st.error(f"Error during prediction: {str(e)}")
         return predict_disease_fallback(image)
 
 # -------------------------------
-# AI Chatbot using Ollama
+# AI Chatbot
 # -------------------------------
 def get_chat_response(user_input):
     """Get response from the AI chatbot with error handling"""
     try:
+        import ollama
         prompt = f"You are a plant disease expert. Answer based on scientific agricultural knowledge.\nQuestion: {user_input}"
         response = ollama.chat(model="tinyllama", messages=[{"role": "user", "content": prompt}])
         return response["message"]["content"]
@@ -303,46 +148,53 @@ def get_chat_response(user_input):
 # -------------------------------
 st.title("🌿 Plant Disease Detection & AI Assistant")
 
+# Model upload section
+st.sidebar.header("Model Setup")
+st.sidebar.info("""
+**Google Drive download is not working.**
+Please upload your model file manually or try alternative hosting.
+""")
+
+uploaded_model = st.sidebar.file_uploader(
+    "Upload Plant Disease Model", 
+    type=["h5", "hdf5"],
+    help="Upload your plant_disease_vgg16_optimized.h5 file"
+)
+
+if uploaded_model is not None:
+    # Save the uploaded file
+    with open(MODEL_PATH, "wb") as f:
+        f.write(uploaded_model.getbuffer())
+    
+    # Clear cache to force reload
+    st.cache_resource.clear()
+    st.sidebar.success("Model uploaded successfully! Please refresh the page.")
+    
+    # Refresh the app
+    st.rerun()
+
+# Alternative hosting options
+with st.sidebar.expander("Alternative Hosting Options"):
+    st.markdown("""
+    **If your model is hosted elsewhere:**
+    1. **Hugging Face Hub**: Upload your model to Hugging Face
+    2. **GitHub Releases**: Use GitHub's release feature for large files
+    3. **Dropbox**: Use a shared link with dl.dropboxusercontent.com
+    4. **AWS S3**: Use pre-signed URLs for secure access
+    
+    **To fix Google Drive issues:**
+    - Ensure file is set to "Anyone with the link can view"
+    - Avoid frequent downloads which may trigger restrictions
+    """)
+
 # Model status
 if vgg_model is None:
     st.warning("""
     ⚠️ **Plant Disease Model Not Loaded**
     
-    The plant disease detection model could not be loaded. This may be due to:
-    - Google Drive download restrictions
-    - Corrupted model file download
-    - Version incompatibility
-    
-    Using fallback detection method (limited accuracy).
+    Please upload your model file using the sidebar.
+    Without the model, we can only provide basic image analysis.
     """)
-    
-    # Provide instructions for fixing the issue
-    with st.expander("How to fix this issue"):
-        st.markdown("""
-        ### Solution for Model Loading Issues
-        
-        1. **Check Google Drive Permissions**:
-           - Ensure the model file is set to "Anyone with the link can view" in Google Drive
-           - The file might have download restrictions due to too many accesses
-        
-        2. **Alternative Hosting**:
-           - Consider uploading the model to an alternative hosting service
-           - GitHub Releases (for files up to 2GB)
-           - Dropbox with direct download links
-           - AWS S3 with pre-signed URLs
-        
-        3. **Manual Upload**:
-           - For Streamlit Cloud, you might need to manually upload the model file
-           - Use the Streamlit file uploader to upload the model file
-        """)
-        
-        # Manual upload option
-        uploaded_model = st.file_uploader("Or manually upload the model file", type=["h5"])
-        if uploaded_model is not None:
-            with open(MODEL_PATH, "wb") as f:
-                f.write(uploaded_model.getbuffer())
-            st.success("Model file uploaded! Refreshing...")
-            st.rerun()
 else:
     st.success("✅ Plant Disease Model Loaded Successfully!")
 
@@ -372,6 +224,10 @@ with tab1:
                 st.subheader("🔍 Prediction Results:")
                 st.write(f"**Disease Type:** {disease}")
                 st.write(f"**Confidence:** {confidence:.2f}%")
+                
+                # Show model status
+                if vgg_model is None:
+                    st.info("ℹ️ Using fallback analysis (limited accuracy)")
                 
                 # AI Recommendations
                 st.subheader("🩺 AI Suggestions:")
@@ -414,8 +270,3 @@ with st.expander("Debug Information"):
     if os.path.exists(MODEL_PATH):
         st.write(f"Model size: {os.path.getsize(MODEL_PATH)} bytes")
         st.write(f"Is valid HDF5: {is_valid_h5_file(MODEL_PATH)}")
-        
-    # Add a button to manually retry download
-    if st.button("Manual Download Retry"):
-        if download_and_verify_model():
-            st.rerun()
