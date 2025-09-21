@@ -1,5 +1,6 @@
 # Core ML and DL
 tensorflow==2.15.0
+keras==2.15.0  # Compatible with TensorFlow 2.15.0
 torch==2.1.0
 torchaudio==2.1.0
 openai-whisper==20231117
@@ -40,4 +41,4 @@ typing-extensions==4.15.0
 tzlocal==5.3.1
 validators==0.35.0
 gitpython==3.1.45
-h5py==3.10.0  # For HDF5 file handling
+h5py==3.10.0
