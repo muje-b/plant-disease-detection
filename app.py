@@ -1,9 +1,9 @@
 import streamlit as st
 import numpy as np
 from PIL import Image
-import os
-import time
 import tempfile
+import atexit
+import os
 
 # Initialize session state with proper default values
 if 'model_loaded' not in st.session_state:
@@ -18,6 +18,22 @@ if 'model_validated' not in st.session_state:
     st.session_state.model_validated = False
 if 'last_model_path' not in st.session_state:
     st.session_state.last_model_path = ""
+if 'temp_files' not in st.session_state:
+    st.session_state.temp_files = []
+
+# Cleanup function for temporary files
+def cleanup_temp_files():
+    """Clean up temporary files"""
+    for temp_file in st.session_state.temp_files:
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        except Exception:
+            pass  # Ignore cleanup errors
+    st.session_state.temp_files = []
+
+# Register cleanup function
+atexit.register(cleanup_temp_files)
 
 # -------------------------------
 # App Configuration
@@ -31,53 +47,46 @@ st.set_page_config(
 # -------------------------------
 # Model Loading Functions
 # -------------------------------
-def load_keras_model(model_path):
-    """Load a Keras model from .h5 file with validation"""
+def load_tflite_model(model_path):
+    """Load a TensorFlow Lite model with validation"""
     try:
-        from tensorflow.keras.models import load_model
-        model = load_model(model_path)
+        import tensorflow as tf
+        interpreter = tf.lite.Interpreter(model_path=model_path)
+        interpreter.allocate_tensors()
         
         # Validate the model is functional
-        input_shape = model.input.shape.as_list()[1:]  # Exclude batch dim
-        test_input = np.random.rand(1, *input_shape).astype(np.float32)
-        _ = model.predict(test_input)
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
         
-        return model, True
+        # Test with a sample input
+        test_input = np.random.rand(*input_details[0]['shape']).astype(input_details[0]['dtype'])
+        interpreter.set_tensor(input_details[0]['index'], test_input)
+        interpreter.invoke()
+        _ = interpreter.get_tensor(output_details[0]['index'])
+        
+        return interpreter, True
+    except ImportError:
+        st.error("TensorFlow is not installed. Please install TensorFlow to use .tflite models.")
+        return None, False
     except Exception as e:
         st.error(f"Model loading failed: {str(e)}")
-        # Attempt to load as weights with VGG16 architecture
-        try:
-            from tensorflow.keras.applications.vgg16 import VGG16
-            from tensorflow.keras.layers import Dense, Flatten, Dropout
-            from tensorflow.keras.models import Model
-            base_model = VGG16(weights=None, include_top=False, input_shape=(224, 224, 3))
-            x = Flatten()(base_model.output)
-            x = Dense(512, activation='relu')(x)
-            x = Dropout(0.5)(x)
-            predictions = Dense(38, activation='softmax')(x)
-            model = Model(inputs=base_model.input, outputs=predictions)
-            model.load_weights(model_path)
-            
-            # Validate
-            test_input = np.random.rand(1, 224, 224, 3).astype(np.float32)
-            _ = model.predict(test_input)
-            
-            st.info("Loaded model weights into VGG16 architecture (assuming standard fine-tuned setup).")
-            return model, True
-        except Exception as weights_e:
-            st.error(f"Failed to load as weights: {str(weights_e)}")
-            return None, False
+        return None, False
 
 def validate_model_state():
     """Validate that the model is properly loaded and functional"""
     if st.session_state.model_loaded and st.session_state.model is not None:
         try:
             # Test the model with sample data
-            from tensorflow import keras
-            if isinstance(st.session_state.model, keras.Model):
-                input_shape = st.session_state.model.input.shape.as_list()[1:]
-                test_input = np.random.rand(1, *input_shape).astype(np.float32)
-                _ = st.session_state.model.predict(test_input)
+            if hasattr(st.session_state.model, 'get_input_details'):
+                interpreter = st.session_state.model
+                input_details = interpreter.get_input_details()
+                output_details = interpreter.get_output_details()
+                
+                # Create test input
+                test_input = np.random.rand(*input_details[0]['shape']).astype(input_details[0]['dtype'])
+                interpreter.set_tensor(input_details[0]['index'], test_input)
+                interpreter.invoke()
+                _ = interpreter.get_tensor(output_details[0]['index'])
                 
                 st.session_state.model_validated = True
                 return True
@@ -96,26 +105,46 @@ def predict_disease_fallback(image):
     """Simple fallback disease prediction"""
     # Simple heuristic based on color analysis
     image_array = np.array(image.resize((224, 224)))
-    avg_green = np.mean(image_array[:, :, 1])  # Green channel
+    
+    # Check if image has color channels
+    if len(image_array.shape) == 3 and image_array.shape[2] >= 3:
+        avg_green = np.mean(image_array[:, :, 1])  # Green channel
+    else:
+        # Grayscale image - use overall brightness
+        avg_green = np.mean(image_array)
     
     if avg_green > 150:
         return "Healthy", 75.0
     else:
         return "Possible Disease", 65.0
 
-def predict_disease_keras(image, model):
-    """Predict disease from an image using Keras model"""
-    # Get input shape (exclude batch dim)
-    input_shape = model.input.shape.as_list()[1:3]  # Height and width
-    height, width = input_shape[0], input_shape[1]
+def predict_disease_tflite(image, interpreter):
+    """Predict disease from an image using TensorFlow Lite model"""
+    # Get input and output details
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
     
-    # Preprocess the image
-    img_array = np.array(image.resize((width, height)))
-    img_array = img_array / 255.0  # Assume [0,1] normalization
-    image = np.expand_dims(img_array, axis=0).astype(np.float32)
+    # Get model's expected input shape
+    input_shape = input_details[0]['shape']
+    target_height, target_width = input_shape[1], input_shape[2]
     
-    # Run prediction
-    prediction = model.predict(image)[0]
+    # Preprocess the image according to model requirements
+    image = np.array(image.resize((target_width, target_height))) / 255.0
+    
+    # Ensure proper input format
+    if len(input_shape) == 4:  # Batch dimension present
+        image = np.expand_dims(image, axis=0).astype(np.float32)
+    else:
+        image = image.astype(np.float32)
+    
+    # Set the input tensor
+    interpreter.set_tensor(input_details[0]['index'], image)
+    
+    # Run inference
+    interpreter.invoke()
+    
+    # Get the prediction
+    prediction = interpreter.get_tensor(output_details[0]['index'])
     
     class_names = [
         "Apple Scab", "Apple Black Rot", "Apple Cedar Rust", "Apple Healthy",
@@ -135,7 +164,13 @@ def predict_disease_keras(image, model):
         "Tomato Target Spot", "Tomato Yellow Leaf Curl Virus", "Tomato Mosaic Virus", "Tomato Healthy"
     ]
     
-    predicted_class = class_names[np.argmax(prediction)]
+    # Safe indexing with bounds checking
+    predicted_class_idx = np.argmax(prediction)
+    if predicted_class_idx < len(class_names):
+        predicted_class = class_names[predicted_class_idx]
+    else:
+        predicted_class = f"Unknown Class {predicted_class_idx}"
+    
     confidence = np.max(prediction) * 100
     return predicted_class, confidence
 
@@ -145,9 +180,9 @@ def predict_disease(image):
         return predict_disease_fallback(image)
     
     try:
-        from tensorflow import keras
-        if isinstance(st.session_state.model, keras.Model):
-            return predict_disease_keras(image, st.session_state.model)
+        # Check if we're using a TensorFlow Lite model
+        if hasattr(st.session_state.model, 'get_input_details'):
+            return predict_disease_tflite(image, st.session_state.model)
         else:
             return predict_disease_fallback(image)
     except Exception as e:
@@ -164,12 +199,10 @@ def get_chat_response(user_input):
         prompt = f"You are a plant disease expert. Answer based on scientific agricultural knowledge.\nQuestion: {user_input}"
         response = ollama.chat(model="tinyllama", messages=[{"role": "user", "content": prompt}])
         return response["message"]["content"]
+    except ImportError:
+        return "AI chat feature requires Ollama to be installed. Please install Ollama and the 'tinyllama' model to use this feature."
     except Exception as e:
         return f"Sorry, I encountered an error: {str(e)}. Please try again later."
-
-# Note: Ollama may not work directly on Streamlit Cloud as it requires a local server. 
-# Consider replacing with a cloud-based API (e.g., Grok API at https://x.ai/api or OpenAI) for deployment.
-# To use Grok API, you would need an API key and modify this function accordingly.
 
 # -------------------------------
 # Image Upload Functions
@@ -205,8 +238,14 @@ def render_image_uploader():
             image.verify()  # Verify that it's a valid image file
             
             # Reset the image pointer after verify()
-            image_file.seek(0)
             image = Image.open(image_file)
+            
+            # Save the image to a temporary file to avoid BytesIO issues
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+                image.save(tmp_file.name)
+                st.session_state.temp_image_path = tmp_file.name
+                # Track the temporary file for cleanup
+                st.session_state.temp_files.append(tmp_file.name)
             
             return image
             
@@ -243,7 +282,7 @@ def process_uploaded_image(image):
                 with col2:
                     st.metric("Confidence", f"{confidence:.2f}%")
                 with col3:
-                    model_status = "Keras Model" if st.session_state.model_loaded else "Fallback"
+                    model_status = "TFLite Model" if st.session_state.model_loaded else "Fallback"
                     st.metric("Model Used", model_status)
                 
                 # Show model status
@@ -272,20 +311,20 @@ def render_model_upload():
     
     # Model upload section
     uploaded_file = st.sidebar.file_uploader(
-        "Choose a .h5 model file", 
-        type=["h5"],
-        help="Upload your model in Keras .h5 format",
+        "Choose a .tflite model file", 
+        type=["tflite"],
+        help="Upload your model in TensorFlow Lite format",
         key=f"model_uploader_{st.session_state.file_uploader_counter}"
     )
     
     if uploaded_file is not None:
         # Save the uploaded file
-        model_path = "uploaded_model.h5"
+        model_path = "uploaded_model.tflite"
         with open(model_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
         # Load the model
-        model, success = load_keras_model(model_path)
+        model, success = load_tflite_model(model_path)
         if success:
             st.session_state.model = model
             st.session_state.model_loaded = True
@@ -296,7 +335,7 @@ def render_model_upload():
             st.session_state.file_uploader_counter += 1
             st.rerun()
         else:
-            st.sidebar.error("Failed to load the Keras model.")
+            st.sidebar.error("Failed to load the TensorFlow Lite model.")
             # Increment the counter to reset the uploader
             st.session_state.file_uploader_counter += 1
 
@@ -346,21 +385,8 @@ def main():
         - Receive treatment recommendations
         - Chat with a plant disease expert AI
         
-        **Note:** For best results, upload your model in Keras .h5 format.
+        **Note:** For best results, convert your model to TensorFlow Lite format and upload it.
         Without a compatible model, the app uses a simple fallback detection method with limited accuracy.
-        
-        **Deployment Note:** This app is designed for Streamlit Cloud. 
-        To avoid loading errors with older .h5 models (common with Keras 3 in recent TensorFlow versions), 
-        specify tensorflow==2.15.0 in your requirements.txt file. This pins to Keras 2, which has better compatibility with legacy .h5 files.
-        Example requirements.txt:
-        ```
-        streamlit
-        numpy
-        pillow
-        tensorflow==2.15.0
-        ```
-        The Ollama-based chatbot may require additional setup or replacement for cloud deployment. Consider using a cloud API like Grok API (see https://x.ai/api for details).
-        If the error persists, check the specific error message displayed and ensure the .h5 is a full model file, not weights only.
         """)
 
 # Run the app
