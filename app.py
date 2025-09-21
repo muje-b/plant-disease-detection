@@ -3,12 +3,18 @@ import numpy as np
 from PIL import Image
 import os
 import time
+import requests
+from io import BytesIO
 
 # Initialize session state
 if 'model_loaded' not in st.session_state:
     st.session_state.model_loaded = False
 if 'model' not in st.session_state:
     st.session_state.model = None
+if 'file_uploader_counter' not in st.session_state:
+    st.session_state.file_uploader_counter = 0
+if 'image_uploader_counter' not in st.session_state:
+    st.session_state.image_uploader_counter = 0
 
 # -------------------------------
 # App Configuration
@@ -31,6 +37,26 @@ def load_tflite_model(model_path):
         return interpreter, True
     except Exception as e:
         return None, False
+
+def validate_model_state():
+    """Validate that the model is properly loaded and functional"""
+    if st.session_state.model_loaded and st.session_state.model is not None:
+        try:
+            # Simple test to verify model is working
+            test_input = np.random.rand(1, 224, 224, 3).astype(np.float32)
+            if hasattr(st.session_state.model, 'get_input_details'):
+                # TensorFlow Lite model
+                interpreter = st.session_state.model
+                input_details = interpreter.get_input_details()
+                interpreter.set_tensor(input_details[0]['index'], test_input)
+                interpreter.invoke()
+                return True
+        except Exception as e:
+            st.error(f"Model validation failed: {str(e)}")
+            st.session_state.model_loaded = False
+            st.session_state.model = None
+            return False
+    return False
 
 # -------------------------------
 # Plant Disease Prediction Functions
@@ -89,7 +115,7 @@ def predict_disease_tflite(image, interpreter):
 
 def predict_disease(image):
     """Predict disease from an image"""
-    if st.session_state.model is None:
+    if st.session_state.model is None or not st.session_state.model_loaded:
         return predict_disease_fallback(image)
     
     try:
@@ -114,6 +140,145 @@ def get_chat_response(user_input):
         return response["message"]["content"]
     except Exception as e:
         return f"Sorry, I encountered an error: {str(e)}. Please try again later."
+
+# -------------------------------
+# Image Upload Functions
+# -------------------------------
+def render_image_uploader():
+    """Render the image upload section with proper error handling"""
+    st.header("📤 Plant Disease Detection")
+    
+    # Create a unique key for the file uploader
+    uploader_key = f"image_uploader_{st.session_state.image_uploader_counter}"
+    
+    st.subheader("Upload Leaf Image")
+    image_file = st.file_uploader(
+        "Choose a leaf image...", 
+        type=["jpg", "png", "jpeg"],
+        key=uploader_key
+    )
+    
+    if image_file is not None:
+        try:
+            # Validate the uploaded file
+            if image_file.size == 0:
+                st.error("Uploaded file is empty. Please try again.")
+                return None
+                
+            # Check file type
+            if image_file.type not in ["image/jpeg", "image/png", "image/jpg"]:
+                st.error("Unsupported file format. Please upload a JPG or PNG image.")
+                return None
+                
+            # Open and validate the image
+            image = Image.open(image_file)
+            image.verify()  # Verify that it's a valid image file
+            
+            # Reset the image pointer after verify()
+            image = Image.open(image_file)
+            
+            return image
+            
+        except Exception as e:
+            st.error(f"Error processing uploaded image: {str(e)}")
+            # Increment the uploader counter to reset the uploader
+            st.session_state.image_uploader_counter += 1
+            st.rerun()
+    
+    return None
+
+def render_url_image_input():
+    """Alternative image input via URL"""
+    st.subheader("Or load image from URL")
+    image_url = st.text_input("Enter image URL:", key="image_url_input")
+    
+    if image_url:
+        try:
+            response = requests.get(image_url, timeout=10)
+            if response.status_code == 200:
+                image = Image.open(BytesIO(response.content))
+                return image
+            else:
+                st.error("Failed to download image from URL")
+        except Exception as e:
+            st.error(f"Error loading image from URL: {str(e)}")
+    
+    return None
+
+def process_uploaded_image(image):
+    """Process uploaded image for disease prediction"""
+    try:
+        # Display the uploaded image
+        st.image(image, caption="Uploaded Image", use_container_width=True)
+        
+        # Analyze button
+        if st.button("Analyze Disease", type="primary", key="analyze_button"):
+            with st.spinner("Analyzing..."):
+                # Predict disease
+                disease, confidence = predict_disease(image)
+                
+                # Display results
+                st.subheader("🔍 Analysis Results")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Predicted Condition", disease)
+                with col2:
+                    st.metric("Confidence", f"{confidence:.2f}%")
+                with col3:
+                    model_status = "TFLite Model" if st.session_state.model_loaded else "Fallback"
+                    st.metric("Model Used", model_status)
+                
+                # Show model status
+                if not st.session_state.model_loaded:
+                    st.info("ℹ️ Using fallback analysis (limited accuracy)")
+                
+                # AI Recommendations
+                st.subheader("🩺 AI Recommendations")
+                with st.spinner("Generating recommendations..."):
+                    query = f"What is {disease} in plants and how can I treat it?"
+                    response = get_chat_response(query)
+                    st.write(response)
+                    
+    except Exception as e:
+        st.error(f"Error processing image: {str(e)}")
+        # Reset the file uploader
+        st.session_state.image_uploader_counter += 1
+        st.rerun()
+
+# -------------------------------
+# Model Upload Section
+# -------------------------------
+def render_model_upload():
+    """Render the model upload section"""
+    st.sidebar.header("Model Configuration")
+    
+    # Model upload section
+    uploaded_file = st.sidebar.file_uploader(
+        "Choose a .tflite model file", 
+        type=["tflite"],
+        help="Upload your model in TensorFlow Lite format",
+        key=f"model_uploader_{st.session_state.file_uploader_counter}"
+    )
+    
+    if uploaded_file is not None:
+        # Save the uploaded file
+        model_path = "uploaded_model.tflite"
+        with open(model_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        # Load the model
+        model, success = load_tflite_model(model_path)
+        if success:
+            st.session_state.model = model
+            st.session_state.model_loaded = True
+            st.sidebar.success("Model loaded successfully!")
+            # Increment the counter to reset the uploader
+            st.session_state.file_uploader_counter += 1
+            st.rerun()
+        else:
+            st.sidebar.error("Failed to load the TensorFlow Lite model.")
+            # Increment the counter to reset the uploader
+            st.session_state.file_uploader_counter += 1
 
 # -------------------------------
 # Conversion Instructions
@@ -160,73 +325,6 @@ def show_conversion_instructions():
         
         3. **Upload the converted model** below
         """)
-        
-        # Downloadable conversion script
-        conversion_script = """
-        import tensorflow as tf
-        import keras
-        
-        # Load your Keras 3 model
-        print("Loading model...")
-        model = keras.models.load_model("plant_disease_vgg16_optimized.h5")
-        
-        # Convert to TensorFlow Lite
-        print("Converting to TensorFlow Lite...")
-        converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        tflite_model = converter.convert()
-        
-        # Save the converted model
-        print("Saving converted model...")
-        with open('converted_model.tflite', 'wb') as f:
-            f.write(tflite_model)
-            
-        print("Conversion successful! Upload 'converted_model.tflite' to this app.")
-        """
-        
-        st.download_button(
-            label="Download Conversion Script",
-            data=conversion_script,
-            file_name="convert_model.py",
-            mime="text/python"
-        )
-
-# -------------------------------
-# Model Upload Section
-# -------------------------------
-def render_model_upload():
-    """Render the model upload section"""
-    st.sidebar.header("Model Configuration")
-    
-    show_conversion_instructions()
-    
-    # Model upload section
-    st.sidebar.subheader("Upload Converted Model")
-    uploaded_file = st.sidebar.file_uploader(
-        "Choose a .tflite model file", 
-        type=["tflite"],
-        help="Upload your model in TensorFlow Lite format"
-    )
-    
-    if uploaded_file is not None:
-        # Save the uploaded file
-        model_path = "uploaded_model.tflite"
-        with open(model_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        # Load the model
-        model, success = load_tflite_model(model_path)
-        if success:
-            st.session_state.model = model
-            st.session_state.model_loaded = True
-            st.sidebar.success("Model loaded successfully!")
-            st.rerun()
-        else:
-            st.sidebar.error("Failed to load the TensorFlow Lite model.")
-    
-    # Alternative: Use a pre-converted model from URL
-    st.sidebar.subheader("Or Use Pre-converted Model")
-    if st.sidebar.button("Use Demo Model (If Available)"):
-        st.sidebar.info("This would load a pre-converted model if available.")
 
 # -------------------------------
 # Main Application UI
@@ -234,11 +332,14 @@ def render_model_upload():
 def main():
     st.title("🌿 Plant Disease Detection & AI Assistant")
     
+    # Show conversion instructions
+    show_conversion_instructions()
+    
     # Render the model upload section
     render_model_upload()
     
-    # Display model status
-    if st.session_state.model_loaded:
+    # Validate model state and display appropriate status
+    if validate_model_state():
         st.sidebar.success("✅ Model Loaded Successfully!")
     else:
         st.sidebar.warning("⚠️ No Model Loaded - Using Fallback Mode")
@@ -247,45 +348,17 @@ def main():
     tab1, tab2, tab3 = st.tabs(["Image Analysis", "Text Chat", "About"])
     
     with tab1:
-        st.header("📤 Plant Disease Detection")
+        # Render image uploader
+        uploaded_image = render_image_uploader()
         
-        # Image upload section
-        st.subheader("Upload Leaf Image")
-        image_file = st.file_uploader(
-            "Choose a leaf image...", 
-            type=["jpg", "png", "jpeg"],
-            key="image_uploader"
-        )
+        # Alternative URL input
+        url_image = render_url_image_input()
         
-        if image_file is not None:
-            # Display the uploaded image
-            image = Image.open(image_file)
-            st.image(image, caption="Uploaded Image", use_container_width=True)
-            
-            # Analyze button
-            if st.button("Analyze Disease", type="primary"):
-                with st.spinner("Analyzing..."):
-                    # Predict disease
-                    disease, confidence = predict_disease(image)
-                    
-                    # Display results
-                    st.subheader("🔍 Analysis Results")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Predicted Condition", disease)
-                    with col2:
-                        st.metric("Confidence", f"{confidence:.2f}%")
-                    
-                    # Show model status
-                    if not st.session_state.model_loaded:
-                        st.info("ℹ️ Using fallback analysis (limited accuracy)")
-                    
-                    # AI Recommendations
-                    st.subheader("🩺 AI Recommendations")
-                    with st.spinner("Generating recommendations..."):
-                        query = f"What is {disease} in plants and how can I treat it?"
-                        response = get_chat_response(query)
-                        st.write(response)
+        # Process the uploaded image
+        if uploaded_image is not None:
+            process_uploaded_image(uploaded_image)
+        elif url_image is not None:
+            process_uploaded_image(url_image)
     
     with tab2:
         st.header("💬 Plant Expert Chat")
