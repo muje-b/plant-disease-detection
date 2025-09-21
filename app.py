@@ -45,7 +45,28 @@ def load_keras_model(model_path):
         return model, True
     except Exception as e:
         st.error(f"Model loading failed: {str(e)}")
-        return None, False
+        # Attempt to load as weights with VGG16 architecture
+        try:
+            from tensorflow.keras.applications.vgg16 import VGG16
+            from tensorflow.keras.layers import Dense, Flatten, Dropout
+            from tensorflow.keras.models import Model
+            base_model = VGG16(weights=None, include_top=False, input_shape=(224, 224, 3))
+            x = Flatten()(base_model.output)
+            x = Dense(512, activation='relu')(x)
+            x = Dropout(0.5)(x)
+            predictions = Dense(38, activation='softmax')(x)
+            model = Model(inputs=base_model.input, outputs=predictions)
+            model.load_weights(model_path)
+            
+            # Validate
+            test_input = np.random.rand(1, 224, 224, 3).astype(np.float32)
+            _ = model.predict(test_input)
+            
+            st.info("Loaded model weights into VGG16 architecture (assuming standard fine-tuned setup).")
+            return model, True
+        except Exception as weights_e:
+            st.error(f"Failed to load as weights: {str(weights_e)}")
+            return None, False
 
 def validate_model_state():
     """Validate that the model is properly loaded and functional"""
@@ -147,7 +168,8 @@ def get_chat_response(user_input):
         return f"Sorry, I encountered an error: {str(e)}. Please try again later."
 
 # Note: Ollama may not work directly on Streamlit Cloud as it requires a local server. 
-# Consider replacing with a cloud-based API (e.g., Grok API or OpenAI) for deployment.
+# Consider replacing with a cloud-based API (e.g., Grok API at https://x.ai/api or OpenAI) for deployment.
+# To use Grok API, you would need an API key and modify this function accordingly.
 
 # -------------------------------
 # Image Upload Functions
@@ -327,8 +349,18 @@ def main():
         **Note:** For best results, upload your model in Keras .h5 format.
         Without a compatible model, the app uses a simple fallback detection method with limited accuracy.
         
-        **Deployment Note:** This app is designed for Streamlit Cloud. Ensure 'tensorflow' and other dependencies are in your requirements.txt.
-        The Ollama-based chatbot may require additional setup or replacement for cloud deployment.
+        **Deployment Note:** This app is designed for Streamlit Cloud. 
+        To avoid loading errors with older .h5 models (common with Keras 3 in recent TensorFlow versions), 
+        specify tensorflow==2.15.0 in your requirements.txt file. This pins to Keras 2, which has better compatibility with legacy .h5 files.
+        Example requirements.txt:
+        ```
+        streamlit
+        numpy
+        pillow
+        tensorflow==2.15.0
+        ```
+        The Ollama-based chatbot may require additional setup or replacement for cloud deployment. Consider using a cloud API like Grok API (see https://x.ai/api for details).
+        If the error persists, check the specific error message displayed and ensure the .h5 is a full model file, not weights only.
         """)
 
 # Run the app
