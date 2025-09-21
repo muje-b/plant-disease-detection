@@ -31,24 +31,18 @@ st.set_page_config(
 # -------------------------------
 # Model Loading Functions
 # -------------------------------
-def load_tflite_model(model_path):
-    """Load a TensorFlow Lite model with validation"""
+def load_keras_model(model_path):
+    """Load a Keras model from .h5 file with validation"""
     try:
-        import tensorflow as tf
-        interpreter = tf.lite.Interpreter(model_path=model_path)
-        interpreter.allocate_tensors()
+        from tensorflow.keras.models import load_model
+        model = load_model(model_path)
         
         # Validate the model is functional
-        input_details = interpreter.get_input_details()
-        output_details = interpreter.get_output_details()
+        input_shape = model.input.shape.as_list()[1:]  # Exclude batch dim
+        test_input = np.random.rand(1, *input_shape).astype(np.float32)
+        _ = model.predict(test_input)
         
-        # Test with a sample input
-        test_input = np.random.rand(*input_details[0]['shape']).astype(input_details[0]['dtype'])
-        interpreter.set_tensor(input_details[0]['index'], test_input)
-        interpreter.invoke()
-        _ = interpreter.get_tensor(output_details[0]['index'])
-        
-        return interpreter, True
+        return model, True
     except Exception as e:
         st.error(f"Model loading failed: {str(e)}")
         return None, False
@@ -58,16 +52,11 @@ def validate_model_state():
     if st.session_state.model_loaded and st.session_state.model is not None:
         try:
             # Test the model with sample data
-            if hasattr(st.session_state.model, 'get_input_details'):
-                interpreter = st.session_state.model
-                input_details = interpreter.get_input_details()
-                output_details = interpreter.get_output_details()
-                
-                # Create test input
-                test_input = np.random.rand(*input_details[0]['shape']).astype(input_details[0]['dtype'])
-                interpreter.set_tensor(input_details[0]['index'], test_input)
-                interpreter.invoke()
-                _ = interpreter.get_tensor(output_details[0]['index'])
+            from tensorflow import keras
+            if isinstance(st.session_state.model, keras.Model):
+                input_shape = st.session_state.model.input.shape.as_list()[1:]
+                test_input = np.random.rand(1, *input_shape).astype(np.float32)
+                _ = st.session_state.model.predict(test_input)
                 
                 st.session_state.model_validated = True
                 return True
@@ -93,24 +82,19 @@ def predict_disease_fallback(image):
     else:
         return "Possible Disease", 65.0
 
-def predict_disease_tflite(image, interpreter):
-    """Predict disease from an image using TensorFlow Lite model"""
-    # Get input and output details
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
+def predict_disease_keras(image, model):
+    """Predict disease from an image using Keras model"""
+    # Get input shape (exclude batch dim)
+    input_shape = model.input.shape.as_list()[1:3]  # Height and width
+    height, width = input_shape[0], input_shape[1]
     
-    # Preprocess the image according to model requirements
-    image = np.array(image.resize((224, 224))) / 255.0
-    image = np.expand_dims(image, axis=0).astype(np.float32)
+    # Preprocess the image
+    img_array = np.array(image.resize((width, height)))
+    img_array = img_array / 255.0  # Assume [0,1] normalization
+    image = np.expand_dims(img_array, axis=0).astype(np.float32)
     
-    # Set the input tensor
-    interpreter.set_tensor(input_details[0]['index'], image)
-    
-    # Run inference
-    interpreter.invoke()
-    
-    # Get the prediction
-    prediction = interpreter.get_tensor(output_details[0]['index'])
+    # Run prediction
+    prediction = model.predict(image)[0]
     
     class_names = [
         "Apple Scab", "Apple Black Rot", "Apple Cedar Rust", "Apple Healthy",
@@ -140,9 +124,9 @@ def predict_disease(image):
         return predict_disease_fallback(image)
     
     try:
-        # Check if we're using a TensorFlow Lite model
-        if hasattr(st.session_state.model, 'get_input_details'):
-            return predict_disease_tflite(image, st.session_state.model)
+        from tensorflow import keras
+        if isinstance(st.session_state.model, keras.Model):
+            return predict_disease_keras(image, st.session_state.model)
         else:
             return predict_disease_fallback(image)
     except Exception as e:
@@ -161,6 +145,9 @@ def get_chat_response(user_input):
         return response["message"]["content"]
     except Exception as e:
         return f"Sorry, I encountered an error: {str(e)}. Please try again later."
+
+# Note: Ollama may not work directly on Streamlit Cloud as it requires a local server. 
+# Consider replacing with a cloud-based API (e.g., Grok API or OpenAI) for deployment.
 
 # -------------------------------
 # Image Upload Functions
@@ -196,12 +183,8 @@ def render_image_uploader():
             image.verify()  # Verify that it's a valid image file
             
             # Reset the image pointer after verify()
+            image_file.seek(0)
             image = Image.open(image_file)
-            
-            # Save the image to a temporary file to avoid BytesIO issues
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-                image.save(tmp_file.name)
-                st.session_state.temp_image_path = tmp_file.name
             
             return image
             
@@ -238,7 +221,7 @@ def process_uploaded_image(image):
                 with col2:
                     st.metric("Confidence", f"{confidence:.2f}%")
                 with col3:
-                    model_status = "TFLite Model" if st.session_state.model_loaded else "Fallback"
+                    model_status = "Keras Model" if st.session_state.model_loaded else "Fallback"
                     st.metric("Model Used", model_status)
                 
                 # Show model status
@@ -267,20 +250,20 @@ def render_model_upload():
     
     # Model upload section
     uploaded_file = st.sidebar.file_uploader(
-        "Choose a .tflite model file", 
-        type=["tflite"],
-        help="Upload your model in TensorFlow Lite format",
+        "Choose a .h5 model file", 
+        type=["h5"],
+        help="Upload your model in Keras .h5 format",
         key=f"model_uploader_{st.session_state.file_uploader_counter}"
     )
     
     if uploaded_file is not None:
         # Save the uploaded file
-        model_path = "uploaded_model.tflite"
+        model_path = "uploaded_model.h5"
         with open(model_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
         # Load the model
-        model, success = load_tflite_model(model_path)
+        model, success = load_keras_model(model_path)
         if success:
             st.session_state.model = model
             st.session_state.model_loaded = True
@@ -291,7 +274,7 @@ def render_model_upload():
             st.session_state.file_uploader_counter += 1
             st.rerun()
         else:
-            st.sidebar.error("Failed to load the TensorFlow Lite model.")
+            st.sidebar.error("Failed to load the Keras model.")
             # Increment the counter to reset the uploader
             st.session_state.file_uploader_counter += 1
 
@@ -341,8 +324,11 @@ def main():
         - Receive treatment recommendations
         - Chat with a plant disease expert AI
         
-        **Note:** For best results, convert your model to TensorFlow Lite format and upload it.
+        **Note:** For best results, upload your model in Keras .h5 format.
         Without a compatible model, the app uses a simple fallback detection method with limited accuracy.
+        
+        **Deployment Note:** This app is designed for Streamlit Cloud. Ensure 'tensorflow' and other dependencies are in your requirements.txt.
+        The Ollama-based chatbot may require additional setup or replacement for cloud deployment.
         """)
 
 # Run the app
