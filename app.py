@@ -1,4 +1,5 @@
 import streamlit as st
+import tensorflow as tf
 import numpy as np
 import speech_recognition as sr
 from gtts import gTTS
@@ -7,11 +8,9 @@ import ollama
 import os
 import gdown
 import requests
-import hashlib
 import h5py
+import time
 from pathlib import Path
-import warnings
-warnings.filterwarnings('ignore')
 
 # -------------------------------
 # App Configuration
@@ -32,56 +31,100 @@ FILE_ID = "1IYZz7ibvzsngy0mFbsUFFFLxjbT7_0Bi"
 # Helper Functions
 # -------------------------------
 def is_valid_h5_file(file_path):
-    """Check if a file is a valid HDF5 file"""
+    """Check if a file is a valid HDF5 file and contains a Keras model"""
     try:
         with h5py.File(file_path, 'r') as f:
-            return True
+            # Check if it has the basic structure of a Keras model
+            if 'model_weights' in f.keys() or 'model_config' in f.keys():
+                return True
+        return False
     except:
         return False
 
+def download_model_with_retry():
+    """Download model with multiple fallback strategies"""
+    # Method 1: Try gdown with direct URL
+    try:
+        url = f"https://drive.google.com/uc?id={FILE_ID}"
+        gdown.download(url, MODEL_PATH, quiet=False)
+        if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 0:
+            if is_valid_h5_file(MODEL_PATH):
+                return True
+            else:
+                st.warning("Downloaded file is not a valid HDF5 model")
+                os.remove(MODEL_PATH)  # Remove invalid file
+    except Exception as e:
+        st.warning(f"gdown failed: {e}")
+    
+    # Method 2: Try alternative Google Drive download URL
+    try:
+        url = f"https://docs.google.com/uc?export=download&id={FILE_ID}"
+        session = requests.Session()
+        response = session.get(url, stream=True)
+        
+        # Handle Google Drive virus scan warning
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                url += f"&confirm={value}"
+                response = session.get(url, stream=True)
+                break
+        
+        # Download the file with progress
+        file_size = int(response.headers.get('Content-Length', 0))
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        with open(MODEL_PATH, "wb") as f:
+            downloaded = 0
+            for chunk in response.iter_content(chunk_size=32768):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if file_size > 0:
+                        progress = min(downloaded / file_size, 1.0)
+                        progress_bar.progress(progress)
+                        status_text.text(f"Downloaded {downloaded}/{file_size} bytes ({progress*100:.1f}%)")
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 0:
+            if is_valid_h5_file(MODEL_PATH):
+                return True
+            else:
+                st.error("Downloaded file is not a valid HDF5 model")
+                return False
+    except Exception as e:
+        st.error(f"Alternative download failed: {e}")
+    
+    return False
+
 # -------------------------------
-# Download VGG16 model from Google Drive with verification
+# Download and Verify Model
 # -------------------------------
 @st.cache_resource
 def download_and_verify_model():
     """Download the model with verification"""
-    download_needed = True
-    model_status = "Not downloaded"
-    
-    # Check if file exists and is valid
+    # Check if file already exists and is valid
     if os.path.exists(MODEL_PATH):
         if is_valid_h5_file(MODEL_PATH):
             st.success("Model already exists and is valid!")
-            download_needed = False
-            model_status = "Valid"
+            return True
         else:
             st.warning("Model file exists but is corrupted. Redownloading...")
             os.remove(MODEL_PATH)
-            model_status = "Corrupted"
     
-    # Download if needed
-    if download_needed:
-        st.info("Downloading VGG16 model from Google Drive...")
-        MODEL_URL = f"https://drive.google.com/uc?id={FILE_ID}"
-        
-        try:
-            gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
-            
-            # Verify the download
-            if is_valid_h5_file(MODEL_PATH):
-                st.success("Model downloaded and verified successfully!")
-                model_status = "Downloaded and valid"
-            else:
-                st.error("Downloaded file is not a valid HDF5 file.")
-                model_status = "Invalid file"
-                return False
-                
-        except Exception as e:
-            st.error(f"Error downloading model: {str(e)}")
-            model_status = f"Download error: {str(e)}"
+    # Download the model
+    with st.spinner("Downloading VGG16 model from Google Drive..."):
+        if download_model_with_retry():
+            st.success("Model downloaded and verified successfully!")
+            return True
+        else:
+            st.error("Failed to download a valid model file.")
             return False
-    
-    return True
+
+# Attempt to download and verify the model
+download_success = download_and_verify_model()
 
 # -------------------------------
 # Load Plant Disease Classification Model (VGG16)
@@ -102,7 +145,6 @@ def load_vgg_model():
         
         # Try to load with standard approach first
         try:
-            import tensorflow as tf
             model = tf.keras.models.load_model(MODEL_PATH)
             st.success("VGG16 model loaded successfully with TensorFlow!")
             return model
@@ -110,7 +152,7 @@ def load_vgg_model():
             st.warning(f"TensorFlow loading failed: {str(e)}")
             st.info("Trying with Keras 3...")
             
-            # Try with Keras 3
+            # Try with Keras 3 if available
             try:
                 import keras
                 model = keras.models.load_model(MODEL_PATH)
@@ -123,9 +165,6 @@ def load_vgg_model():
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         return None
-
-# Attempt to download and verify the model
-download_success = download_and_verify_model()
 
 # Load the model
 vgg_model = load_vgg_model()
@@ -218,6 +257,55 @@ def get_chat_response(user_input):
         return f"Sorry, I encountered an error: {str(e)}. Please try again later."
 
 # -------------------------------
+# Speech Recognition using Whisper
+# -------------------------------
+def recognize_speech():
+    """Recognize speech with error handling"""
+    if whisper_model is None:
+        st.error("Whisper model not available. Speech recognition disabled.")
+        return None
+        
+    recognizer = sr.Recognizer()
+    try:
+        with sr.Microphone() as source:
+            st.info("🎤 Listening...")
+            audio = recognizer.listen(source, timeout=5)
+
+        audio_data = audio.get_wav_data()
+        with open("temp_audio.wav", "wb") as f:
+            f.write(audio_data)
+
+        result = whisper_model.transcribe("temp_audio.wav")
+        user_text = result["text"]
+        
+        if not user_text.strip():
+            st.error("❌ No speech detected. Please try again.")
+            return None
+
+        st.success(f"🗣️ You said: {user_text}")
+        return user_text
+    except sr.WaitTimeoutError:
+        st.error("❌ Listening timed out. Please try again.")
+        return None
+    except Exception as e:
+        st.error(f"❌ Error in speech recognition: {str(e)}")
+        return None
+
+# -------------------------------
+# Text-to-Speech (TTS) using gTTS
+# -------------------------------
+def text_to_speech(response_text):
+    """Convert text to speech with error handling"""
+    try:
+        tts = gTTS(text=response_text, lang="en")
+        audio_path = "response.mp3"
+        tts.save(audio_path)
+        return audio_path
+    except Exception as e:
+        st.error(f"Error generating speech: {str(e)}")
+        return None
+
+# -------------------------------
 # Streamlit UI
 # -------------------------------
 st.title("🌿 Plant Disease Detection & AI Assistant")
@@ -238,23 +326,23 @@ if vgg_model is None:
     # Provide instructions for fixing the issue
     with st.expander("How to fix this issue"):
         st.markdown("""
-        ### Solution for Keras 3 Compatibility Issue
+        ### Solution for Model Loading Issues
         
-        Your model was saved with Keras 3.8.0, but this app is trying to load it with TensorFlow's Keras.
+        1. **Check Google Drive Permissions**:
+           - Ensure the model file is set to "Anyone with the link can view" in Google Drive
         
-        **Options:**
-        1. **Re-save the model with TensorFlow**: 
-           - Load the model in an environment with Keras 3.8.0
-           - Save it again using `tf.keras.models.save_model()`
+        2. **Re-download the Model**:
+           - Click the button below to attempt to download the model again
+           - If this fails, consider hosting the model on an alternative platform
         
-        2. **Install Keras 3 in this environment**:
-           - Add `keras==3.8.0` to your requirements.txt
-           - Modify the code to use `keras.models.load_model()` instead of `tf.keras.models.load_model()`
-        
-        3. **Use a different model format**:
-           - Convert to TensorFlow Lite (.tflite) for better compatibility
-           - Use ONNX format for cross-framework compatibility
+        3. **Model Compatibility**:
+           - Your model was saved with Keras 3.8.0 but this app uses TensorFlow's Keras
+           - Consider re-saving the model with TensorFlow format
         """)
+        
+        if st.button("Retry Model Download"):
+            if download_and_verify_model():
+                st.rerun()
 else:
     st.success("✅ Plant Disease Model Loaded Successfully!")
 
@@ -307,8 +395,19 @@ with tab3:
         if whisper_model is None:
             st.error("Whisper model not available. Please try again later.")
         else:
-            # Placeholder for voice recognition
-            st.info("Voice recognition would be available when the Whisper model is loaded.")
+            voice_text = recognize_speech()
+            if voice_text:
+                with st.spinner("Processing your question..."):
+                    ai_response = get_chat_response(voice_text)
+                    st.write(f"**Your question:** {voice_text}")
+                    st.write(f"**AI Answer:** {ai_response}")
+                    
+                    # Convert AI Response to Speech and Play in UI
+                    audio_file_path = text_to_speech(ai_response)
+                    if audio_file_path:
+                        with open(audio_file_path, "rb") as audio_file:
+                            audio_bytes = audio_file.read()
+                            st.audio(audio_bytes, format="audio/mp3")
 
 # Add footer with info
 st.markdown("---")
@@ -326,3 +425,8 @@ with st.expander("Debug Information"):
     if os.path.exists(MODEL_PATH):
         st.write(f"Model size: {os.path.getsize(MODEL_PATH)} bytes")
         st.write(f"Is valid HDF5: {is_valid_h5_file(MODEL_PATH)}")
+        
+    # Add a button to manually retry download
+    if st.button("Manual Download Retry"):
+        if download_and_verify_model():
+            st.rerun()
