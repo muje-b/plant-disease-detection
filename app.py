@@ -1,10 +1,24 @@
 import streamlit as st
-import numpy as np
 import tensorflow as tf
+import numpy as np
 from PIL import Image
 import os
 import h5py
 import time
+
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+# Initialize session state
+if 'model_loaded' not in st.session_state:
+    st.session_state.model_loaded = False
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'upload_complete' not in st.session_state:
+    st.session_state.upload_complete = False
+if 'file_uploader_key' not in st.session_state:
+    st.session_state.file_uploader_key = 0
 
 # -------------------------------
 # App Configuration
@@ -16,73 +30,72 @@ st.set_page_config(
 )
 
 # -------------------------------
-# Model Configuration
-# -------------------------------
-MODEL_PATH = "plant_disease_vgg16_optimized.h5"
-
-# -------------------------------
 # Helper Functions
 # -------------------------------
 def is_valid_h5_file(file_path):
     """Check if a file is a valid HDF5 file and contains a Keras model"""
     try:
         with h5py.File(file_path, 'r') as f:
-            # Check if it has the basic structure of a Keras model
-            if 'model_weights' in f.keys() or 'model_config' in f.keys():
-                return True
-        return False
+            return 'model_weights' in f.keys() or 'model_config' in f.keys()
     except:
         return False
 
+def load_model_from_path(model_path):
+    """Load a model from file path with error handling"""
+    try:
+        model = tf.keras.models.load_model(model_path)
+        return model, True
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        return None, False
+
 # -------------------------------
-# Load Plant Disease Classification Model (VGG16)
+# Model Upload Section
 # -------------------------------
-@st.cache_resource
-def load_vgg_model():
-    """Load the VGG16 model with error handling"""
-    if not os.path.exists(MODEL_PATH):
-        return None
+def render_model_upload():
+    """Render the model upload section with proper state management"""
+    st.sidebar.header("Model Configuration")
     
-    try:
-        if not is_valid_h5_file(MODEL_PATH):
-            return None
+    # Model upload section
+    with st.sidebar.expander("Upload Model File", expanded=not st.session_state.model_loaded):
+        st.info("Upload your trained plant disease detection model (.h5 format)")
+        
+        # Use a key that increments on successful upload to reset the uploader
+        uploaded_file = st.file_uploader(
+            "Choose a .h5 model file", 
+            type=["h5"],
+            key=f"model_uploader_{st.session_state.file_uploader_key}"
+        )
+        
+        if uploaded_file is not None:
+            # Save the uploaded file
+            model_path = "uploaded_model.h5"
+            with open(model_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
             
-        # Try to load with standard approach first
-        try:
-            model = tf.keras.models.load_model(MODEL_PATH)
-            return model
-        except Exception as e:
-            # Try with Keras 3 if available
-            try:
-                import keras
-                model = keras.models.load_model(MODEL_PATH)
-                return model
-            except Exception as e2:
-                return None
-                
-    except Exception as e:
-        return None
-
-# Load the model
-vgg_model = load_vgg_model()
-
-# -------------------------------
-# Load Whisper Model
-# -------------------------------
-@st.cache_resource
-def load_whisper_model():
-    """Load the Whisper model with error handling"""
-    try:
-        import whisper
-        model = whisper.load_model("base")
-        return model
-    except Exception as e:
-        return None
-
-whisper_model = load_whisper_model()
+            # Validate the file
+            if is_valid_h5_file(model_path):
+                # Load the model
+                model, success = load_model_from_path(model_path)
+                if success:
+                    st.session_state.model = model
+                    st.session_state.model_loaded = True
+                    st.session_state.upload_complete = True
+                    st.success("Model uploaded and loaded successfully!")
+                    
+                    # Increment the key to reset the uploader
+                    st.session_state.file_uploader_key += 1
+                    
+                    # Add a small delay before rerun to ensure UI updates
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error("Failed to load the model. Please try a different file.")
+            else:
+                st.error("Uploaded file is not a valid HDF5 model file. Please upload a valid Keras model.")
 
 # -------------------------------
-# Predict Disease from Image (Fallback)
+# Plant Disease Prediction Functions
 # -------------------------------
 def predict_disease_fallback(image):
     """Simple fallback disease prediction"""
@@ -96,8 +109,8 @@ def predict_disease_fallback(image):
         return "Possible Disease", 65.0
 
 def predict_disease(image):
-    """Predict disease from an image with fallback"""
-    if vgg_model is None:
+    """Predict disease from an image"""
+    if st.session_state.model is None:
         return predict_disease_fallback(image)
     
     class_names = [
@@ -106,7 +119,7 @@ def predict_disease(image):
         "Corn Cercospora Leaf Spot", "Corn Common Rust", "Corn Northern Leaf Blight", "Corn Healthy",
         "Grape Black Rot", "Grape Esca", "Grape Leaf Blight", "Grape Healthy",
         "Orange Huanglongbing (Citrus Greening)",
-        "Peach Bacterial Step", "Peach Healthy",
+        "Peach Bacterial Spot", "Peach Healthy",
         "Pepper Bell Bacterial Spot", "Pepper Bell Healthy",
         "Potato Early Blight", "Potato Late Blight", "Potato Healthy",
         "Raspberry Healthy",
@@ -119,19 +132,22 @@ def predict_disease(image):
     ]
     
     try:
-        # Standard Keras/TensorFlow model
+        # Preprocess the image
         image = np.array(image.resize((224, 224))) / 255.0
         image = np.expand_dims(image, axis=0)
-        prediction = vgg_model.predict(image)
+        
+        # Make prediction
+        prediction = st.session_state.model.predict(image)
         
         predicted_class = class_names[np.argmax(prediction)]
         confidence = np.max(prediction) * 100
         return predicted_class, confidence
     except Exception as e:
+        st.error(f"Error during prediction: {str(e)}")
         return predict_disease_fallback(image)
 
 # -------------------------------
-# AI Chatbot
+# AI Chatbot Function
 # -------------------------------
 def get_chat_response(user_input):
     """Get response from the AI chatbot with error handling"""
@@ -144,129 +160,100 @@ def get_chat_response(user_input):
         return f"Sorry, I encountered an error: {str(e)}. Please try again later."
 
 # -------------------------------
-# Streamlit UI
+# Main Application UI
 # -------------------------------
-st.title("🌿 Plant Disease Detection & AI Assistant")
-
-# Model upload section
-st.sidebar.header("Model Setup")
-st.sidebar.info("""
-**Google Drive download is not working.**
-Please upload your model file manually or try alternative hosting.
-""")
-
-uploaded_model = st.sidebar.file_uploader(
-    "Upload Plant Disease Model", 
-    type=["h5", "hdf5"],
-    help="Upload your plant_disease_vgg16_optimized.h5 file"
-)
-
-if uploaded_model is not None:
-    # Save the uploaded file
-    with open(MODEL_PATH, "wb") as f:
-        f.write(uploaded_model.getbuffer())
+def main():
+    st.title("🌿 Plant Disease Detection & AI Assistant")
     
-    # Clear cache to force reload
-    st.cache_resource.clear()
-    st.sidebar.success("Model uploaded successfully! Please refresh the page.")
+    # Render the model upload section
+    render_model_upload()
     
-    # Refresh the app
-    st.rerun()
-
-# Alternative hosting options
-with st.sidebar.expander("Alternative Hosting Options"):
-    st.markdown("""
-    **If your model is hosted elsewhere:**
-    1. **Hugging Face Hub**: Upload your model to Hugging Face
-    2. **GitHub Releases**: Use GitHub's release feature for large files
-    3. **Dropbox**: Use a shared link with dl.dropboxusercontent.com
-    4. **AWS S3**: Use pre-signed URLs for secure access
+    # Display model status
+    if st.session_state.model_loaded:
+        st.sidebar.success("✅ Model Loaded Successfully!")
+    else:
+        st.sidebar.warning("⚠️ No Model Loaded - Using Fallback Mode")
     
-    **To fix Google Drive issues:**
-    - Ensure file is set to "Anyone with the link can view"
-    - Avoid frequent downloads which may trigger restrictions
-    """)
-
-# Model status
-if vgg_model is None:
-    st.warning("""
-    ⚠️ **Plant Disease Model Not Loaded**
+    # Create tabs for different functionalities
+    tab1, tab2, tab3 = st.tabs(["Image Analysis", "Text Chat", "About"])
     
-    Please upload your model file using the sidebar.
-    Without the model, we can only provide basic image analysis.
-    """)
-else:
-    st.success("✅ Plant Disease Model Loaded Successfully!")
-
-if whisper_model is None:
-    st.warning("⚠️ Whisper model could not be loaded. Voice features disabled.")
-else:
-    st.success("✅ Whisper Model Loaded Successfully!")
-
-# Create tabs for better organization
-tab1, tab2, tab3 = st.tabs(["Image Analysis", "Text Chat", "Voice Chat"])
-
-with tab1:
-    st.header("📤 Upload Leaf Image for Analysis")
-    
-    # Upload an Image
-    uploaded_file = st.file_uploader("Choose a leaf image...", type=["jpg", "png", "jpeg"], key="image_upload")
-    
-    if uploaded_file:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Uploaded Image", use_container_width=True)
+    with tab1:
+        st.header("📤 Plant Disease Detection")
         
-        # Predict Disease
-        if st.button("Analyze Disease", type="primary"):
-            with st.spinner("Analyzing disease..."):
-                disease, confidence = predict_disease(image)
-                
-                st.subheader("🔍 Prediction Results:")
-                st.write(f"**Disease Type:** {disease}")
-                st.write(f"**Confidence:** {confidence:.2f}%")
-                
-                # Show model status
-                if vgg_model is None:
-                    st.info("ℹ️ Using fallback analysis (limited accuracy)")
-                
-                # AI Recommendations
-                st.subheader("🩺 AI Suggestions:")
-                query = f"What is {disease} and how can I treat it?"
-                response = get_chat_response(query)
-                st.write(response)
-
-with tab2:
-    st.header("💬 Text-based Plant Expert Chat")
+        # Image upload section
+        st.subheader("Upload Leaf Image")
+        image_file = st.file_uploader(
+            "Choose a leaf image...", 
+            type=["jpg", "png", "jpeg"],
+            key="image_uploader"
+        )
+        
+        if image_file is not None:
+            # Display the uploaded image
+            image = Image.open(image_file)
+            st.image(image, caption="Uploaded Image", use_container_width=True)
+            
+            # Analyze button
+            if st.button("Analyze Disease", type="primary"):
+                with st.spinner("Analyzing..."):
+                    # Predict disease
+                    disease, confidence = predict_disease(image)
+                    
+                    # Display results
+                    st.subheader("🔍 Analysis Results")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Predicted Condition", disease)
+                    with col2:
+                        st.metric("Confidence", f"{confidence:.2f}%")
+                    
+                    # Show model status
+                    if not st.session_state.model_loaded:
+                        st.info("ℹ️ Using fallback analysis (limited accuracy)")
+                    
+                    # AI Recommendations
+                    st.subheader("🩺 AI Recommendations")
+                    with st.spinner("Generating recommendations..."):
+                        query = f"What is {disease} in plants and how can I treat it?"
+                        response = get_chat_response(query)
+                        st.write(response)
     
-    user_input = st.text_input("Ask a question about plant diseases:", key="text_input")
-    if user_input:
-        with st.spinner("Thinking..."):
-            ai_response = get_chat_response(user_input)
-            st.write(f"**AI Answer:** {ai_response}")
-
-with tab3:
-    st.header("🎤 Voice-based Plant Expert Chat")
+    with tab2:
+        st.header("💬 Plant Expert Chat")
+        
+        # Text-based chat
+        user_input = st.text_input("Ask a question about plant diseases:", key="text_input")
+        if user_input:
+            with st.spinner("Thinking..."):
+                response = get_chat_response(user_input)
+                st.write(f"**AI Expert:** {response}")
     
-    if st.button("Start Voice Recognition", key="voice_button"):
-        if whisper_model is None:
-            st.error("Whisper model not available. Please try again later.")
-        else:
-            # Placeholder for voice recognition
-            st.info("Voice recognition would be available when the Whisper model is loaded.")
+    with tab3:
+        st.header("ℹ️ About This App")
+        st.markdown("""
+        This plant disease detection app uses deep learning to identify diseases in plant leaves.
+        
+        **Features:**
+        - Upload and analyze plant leaf images
+        - Get AI-powered disease identification
+        - Receive treatment recommendations
+        - Chat with a plant disease expert AI
+        
+        **How to use:**
+        1. Upload a trained model file (.h5 format) in the sidebar
+        2. Upload a plant leaf image for analysis
+        3. View the results and recommendations
+        
+        **Note:** Without a trained model, the app uses a simple fallback detection method with limited accuracy.
+        """)
+        
+        # Debug information
+        with st.expander("Debug Information"):
+            st.write(f"Model loaded: {st.session_state.model_loaded}")
+            if st.session_state.model_loaded:
+                st.write("Model architecture:")
+                st.write(st.session_state.model.summary() if hasattr(st.session_state.model, 'summary') else "No summary available")
 
-# Add footer with info
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center'>
-    <p>This plant disease detection app uses a VGG16 model trained on plant leaf images.</p>
-    <p>For best results, use clear, well-lit images of plant leaves.</p>
-</div>
-""", unsafe_allow_html=True)
-
-# Debug information (collapsible)
-with st.expander("Debug Information"):
-    st.write(f"Model path: {MODEL_PATH}")
-    st.write(f"Model exists: {os.path.exists(MODEL_PATH)}")
-    if os.path.exists(MODEL_PATH):
-        st.write(f"Model size: {os.path.getsize(MODEL_PATH)} bytes")
-        st.write(f"Is valid HDF5: {is_valid_h5_file(MODEL_PATH)}")
+# Run the app
+if __name__ == "__main__":
+    main()
