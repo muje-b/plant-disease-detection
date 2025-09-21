@@ -9,8 +9,6 @@ if 'model_loaded' not in st.session_state:
     st.session_state.model_loaded = False
 if 'model' not in st.session_state:
     st.session_state.model = None
-if 'upload_complete' not in st.session_state:
-    st.session_state.upload_complete = False
 
 # -------------------------------
 # App Configuration
@@ -76,44 +74,6 @@ def predict_disease_tflite(image, interpreter):
     return predicted_class, confidence
 
 # -------------------------------
-# Model Upload Section
-# -------------------------------
-def render_model_upload():
-    """Render the model upload section"""
-    st.sidebar.header("Model Configuration")
-    
-    # Model upload section
-    with st.sidebar.expander("Upload Model File", expanded=not st.session_state.model_loaded):
-        st.info("""
-        **Important:** Your original model is in Keras 3 format which is not compatible.
-        Please upload a TensorFlow Lite (.tflite) model instead.
-        """)
-        
-        # Upload TensorFlow Lite model
-        uploaded_file = st.file_uploader(
-            "Choose a .tflite model file", 
-            type=["tflite"],
-            key="model_uploader"
-        )
-        
-        if uploaded_file is not None:
-            # Save the uploaded file
-            model_path = "uploaded_model.tflite"
-            with open(model_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            # Load the model
-            model, success = load_tflite_model(model_path)
-            if success:
-                st.session_state.model = model
-                st.session_state.model_loaded = True
-                st.session_state.upload_complete = True
-                st.success("Model loaded successfully!")
-                st.rerun()
-            else:
-                st.error("Failed to load the TensorFlow Lite model.")
-
-# -------------------------------
 # Plant Disease Prediction Functions
 # -------------------------------
 def predict_disease_fallback(image):
@@ -160,15 +120,18 @@ def get_chat_response(user_input):
 # -------------------------------
 def show_conversion_instructions():
     """Show instructions for converting the model"""
-    with st.sidebar.expander("How to Convert Your Model"):
+    with st.sidebar.expander("How to Convert Your Model", expanded=True):
         st.markdown("""
-        ### Convert Your Keras 3 Model to TensorFlow Lite
+        ### Convert Your Model to TensorFlow Lite Format
         
-        Your model was created with Keras 3.x, which is not compatible with this environment.
+        **Why convert?**
+        - TensorFlow Lite models are smaller and more efficient
+        - Better compatibility across different platforms
+        - Faster inference on mobile and web applications
         
-        **To convert your model:**
+        **Conversion Steps:**
         
-        1. **Install TensorFlow and Keras 3** in a local environment:
+        1. **Install required packages:**
         ```bash
         pip install tensorflow keras
         ```
@@ -178,7 +141,7 @@ def show_conversion_instructions():
         import tensorflow as tf
         import keras
         
-        # Load your Keras 3 model
+        # Load your Keras model
         model = keras.models.load_model("plant_disease_vgg16_optimized.h5")
         
         # Convert to TensorFlow Lite
@@ -188,19 +151,88 @@ def show_conversion_instructions():
         # Save the converted model
         with open('converted_model.tflite', 'wb') as f:
             f.write(tflite_model)
+            
+        print("Model converted successfully!")
         ```
         
-        3. **Upload the converted .tflite file** to this app
+        3. **Upload the converted .tflite file** below
         """)
+
+# -------------------------------
+# Model Upload Section
+# -------------------------------
+def render_model_upload():
+    """Render the model upload section"""
+    st.sidebar.header("Model Configuration")
+    
+    show_conversion_instructions()
+    
+    # Option 1: Upload TensorFlow Lite model
+    st.sidebar.subheader("Upload Converted Model")
+    uploaded_file = st.sidebar.file_uploader(
+        "Choose a .tflite model file", 
+        type=["tflite"],
+        help="Upload your model in TensorFlow Lite format"
+    )
+    
+    if uploaded_file is not None:
+        # Save the uploaded file
+        model_path = "uploaded_model.tflite"
+        with open(model_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        # Load the model
+        model, success = load_tflite_model(model_path)
+        if success:
+            st.session_state.model = model
+            st.session_state.model_loaded = True
+            st.sidebar.success("Model loaded successfully!")
+            st.rerun()
+        else:
+            st.sidebar.error("Failed to load the TensorFlow Lite model.")
+    
+    # Option 2: Download from URL
+    st.sidebar.subheader("Or Download from URL")
+    model_url = st.sidebar.text_input("Enter model URL:", placeholder="https://example.com/model.tflite")
+    
+    if st.sidebar.button("Download Model") and model_url:
+        try:
+            import requests
+            from urllib.parse import urlparse
+            
+            # Extract filename from URL
+            parsed_url = urlparse(model_url)
+            filename = os.path.basename(parsed_url.path)
+            if not filename:
+                filename = "downloaded_model.tflite"
+                
+            # Download the model
+            response = requests.get(model_url, stream=True)
+            if response.status_code == 200:
+                model_path = filename
+                with open(model_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                # Load the model
+                model, success = load_tflite_model(model_path)
+                if success:
+                    st.session_state.model = model
+                    st.session_state.model_loaded = True
+                    st.sidebar.success("Model downloaded and loaded successfully!")
+                    st.rerun()
+                else:
+                    st.sidebar.error("Failed to load the downloaded model.")
+            else:
+                st.sidebar.error(f"Failed to download model. Status code: {response.status_code}")
+        except Exception as e:
+            st.sidebar.error(f"Error downloading model: {str(e)}")
 
 # -------------------------------
 # Main Application UI
 # -------------------------------
 def main():
     st.title("🌿 Plant Disease Detection & AI Assistant")
-    
-    # Show conversion instructions
-    show_conversion_instructions()
     
     # Render the model upload section
     render_model_upload()
@@ -276,7 +308,7 @@ def main():
         - Receive treatment recommendations
         - Chat with a plant disease expert AI
         
-        **Note:** For best results, upload a TensorFlow Lite (.tflite) model converted from your Keras 3 model.
+        **Note:** For best results, convert your model to TensorFlow Lite format and upload it.
         Without a compatible model, the app uses a simple fallback detection method with limited accuracy.
         """)
 
