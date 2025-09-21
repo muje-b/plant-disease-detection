@@ -1,5 +1,6 @@
 # Core ML and DL
 tensorflow==2.14.0
+h5py==3.9.0
 torch==2.1.0
 torchaudio==2.1.0
 openai-whisper==20231117
