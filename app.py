@@ -3,8 +3,7 @@ import numpy as np
 from PIL import Image
 import os
 import time
-import requests
-from io import BytesIO
+import tempfile
 
 # Initialize session state with proper default values
 if 'model_loaded' not in st.session_state:
@@ -198,6 +197,11 @@ def render_image_uploader():
             
             # Reset the image pointer after verify()
             image = Image.open(image_file)
+            
+            # Save the image to a temporary file to avoid BytesIO issues
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+                image.save(tmp_file.name)
+                st.session_state.temp_image_path = tmp_file.name
             
             return image
             
