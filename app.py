@@ -6,7 +6,7 @@ import time
 import requests
 from io import BytesIO
 
-# Initialize session state
+# Initialize session state with proper default values
 if 'model_loaded' not in st.session_state:
     st.session_state.model_loaded = False
 if 'model' not in st.session_state:
@@ -15,6 +15,8 @@ if 'file_uploader_counter' not in st.session_state:
     st.session_state.file_uploader_counter = 0
 if 'image_uploader_counter' not in st.session_state:
     st.session_state.image_uploader_counter = 0
+if 'model_validated' not in st.session_state:
+    st.session_state.model_validated = False
 
 # -------------------------------
 # App Configuration
@@ -29,32 +31,50 @@ st.set_page_config(
 # Model Loading Functions
 # -------------------------------
 def load_tflite_model(model_path):
-    """Load a TensorFlow Lite model"""
+    """Load a TensorFlow Lite model with validation"""
     try:
         import tensorflow as tf
         interpreter = tf.lite.Interpreter(model_path=model_path)
         interpreter.allocate_tensors()
+        
+        # Validate the model is functional
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
+        
+        # Test with a sample input
+        test_input = np.random.rand(*input_details[0]['shape']).astype(input_details[0]['dtype'])
+        interpreter.set_tensor(input_details[0]['index'], test_input)
+        interpreter.invoke()
+        _ = interpreter.get_tensor(output_details[0]['index'])
+        
         return interpreter, True
     except Exception as e:
+        st.error(f"Model loading failed: {str(e)}")
         return None, False
 
 def validate_model_state():
     """Validate that the model is properly loaded and functional"""
     if st.session_state.model_loaded and st.session_state.model is not None:
         try:
-            # Simple test to verify model is working
-            test_input = np.random.rand(1, 224, 224, 3).astype(np.float32)
+            # Test the model with sample data
             if hasattr(st.session_state.model, 'get_input_details'):
-                # TensorFlow Lite model
                 interpreter = st.session_state.model
                 input_details = interpreter.get_input_details()
+                output_details = interpreter.get_output_details()
+                
+                # Create test input
+                test_input = np.random.rand(*input_details[0]['shape']).astype(input_details[0]['dtype'])
                 interpreter.set_tensor(input_details[0]['index'], test_input)
                 interpreter.invoke()
+                _ = interpreter.get_tensor(output_details[0]['index'])
+                
+                st.session_state.model_validated = True
                 return True
         except Exception as e:
             st.error(f"Model validation failed: {str(e)}")
             st.session_state.model_loaded = False
             st.session_state.model = None
+            st.session_state.model_validated = False
             return False
     return False
 
@@ -78,7 +98,7 @@ def predict_disease_tflite(image, interpreter):
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
     
-    # Preprocess the image
+    # Preprocess the image according to model requirements
     image = np.array(image.resize((224, 224))) / 255.0
     image = np.expand_dims(image, axis=0).astype(np.float32)
     
@@ -187,24 +207,6 @@ def render_image_uploader():
     
     return None
 
-def render_url_image_input():
-    """Alternative image input via URL"""
-    st.subheader("Or load image from URL")
-    image_url = st.text_input("Enter image URL:", key="image_url_input")
-    
-    if image_url:
-        try:
-            response = requests.get(image_url, timeout=10)
-            if response.status_code == 200:
-                image = Image.open(BytesIO(response.content))
-                return image
-            else:
-                st.error("Failed to download image from URL")
-        except Exception as e:
-            st.error(f"Error loading image from URL: {str(e)}")
-    
-    return None
-
 def process_uploaded_image(image):
     """Process uploaded image for disease prediction"""
     try:
@@ -214,6 +216,11 @@ def process_uploaded_image(image):
         # Analyze button
         if st.button("Analyze Disease", type="primary", key="analyze_button"):
             with st.spinner("Analyzing..."):
+                # Revalidate model state before prediction
+                if not validate_model_state():
+                    st.session_state.model_loaded = False
+                    st.session_state.model = None
+                
                 # Predict disease
                 disease, confidence = predict_disease(image)
                 
@@ -271,7 +278,8 @@ def render_model_upload():
         if success:
             st.session_state.model = model
             st.session_state.model_loaded = True
-            st.sidebar.success("Model loaded successfully!")
+            st.session_state.model_validated = True
+            st.sidebar.success("Model loaded and validated successfully!")
             # Increment the counter to reset the uploader
             st.session_state.file_uploader_counter += 1
             st.rerun()
@@ -281,59 +289,10 @@ def render_model_upload():
             st.session_state.file_uploader_counter += 1
 
 # -------------------------------
-# Conversion Instructions
-# -------------------------------
-def show_conversion_instructions():
-    """Show instructions for converting the model"""
-    with st.sidebar.expander("How to Convert Your Model", expanded=True):
-        st.markdown("""
-        ### Your Model Needs Conversion
-        
-        Your model was created with Keras 3.x, which is not compatible with this environment.
-        
-        **Step-by-Step Conversion Guide:**
-        
-        1. **Create a conversion script** on your local machine:
-        
-        ```python
-        # save this as convert_model.py
-        import tensorflow as tf
-        import keras
-        
-        # Load your Keras 3 model
-        print("Loading model...")
-        model = keras.models.load_model("plant_disease_vgg16_optimized.h5")
-        
-        # Convert to TensorFlow Lite
-        print("Converting to TensorFlow Lite...")
-        converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        tflite_model = converter.convert()
-        
-        # Save the converted model
-        print("Saving converted model...")
-        with open('converted_model.tflite', 'wb') as f:
-            f.write(tflite_model)
-            
-        print("Conversion successful! Upload 'converted_model.tflite' to this app.")
-        ```
-        
-        2. **Run the conversion script**:
-        ```bash
-        pip install tensorflow keras
-        python convert_model.py
-        ```
-        
-        3. **Upload the converted model** below
-        """)
-
-# -------------------------------
 # Main Application UI
 # -------------------------------
 def main():
     st.title("🌿 Plant Disease Detection & AI Assistant")
-    
-    # Show conversion instructions
-    show_conversion_instructions()
     
     # Render the model upload section
     render_model_upload()
@@ -351,14 +310,8 @@ def main():
         # Render image uploader
         uploaded_image = render_image_uploader()
         
-        # Alternative URL input
-        url_image = render_url_image_input()
-        
-        # Process the uploaded image
         if uploaded_image is not None:
             process_uploaded_image(uploaded_image)
-        elif url_image is not None:
-            process_uploaded_image(url_image)
     
     with tab2:
         st.header("💬 Plant Expert Chat")
